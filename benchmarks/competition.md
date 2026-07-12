@@ -8,9 +8,10 @@ This is a **local engineering benchmark**, not a claim that one model is univers
 
 | Project | Scope | Result |
 |---|---|---|
-| `pi-agent-workflow` | Typecheck + 4 routing tests | **4/4 passed** |
+| `pi-agent-workflow` | Typecheck + 7 unit tests (routing, JSON errors, evidence contracts) | **7/7 passed** |
 | `pi-agent-workflow` | Deterministic routing corpus | **7/7 (100%)** |
-| `pi-agent-workflow` | Live end-to-end edit smoke test | **passed**: parent delegated `math.ts` fix; worker changed `a-b` to `a+b`; artifact/report persisted |
+| `pi-agent-workflow` | Live end-to-end edit smoke test | **passed**: parent delegated exactly once; worker used read/edit/bash tools, changed `value.txt`, validated it, and returned a structured handoff with artifacts |
+| `pi-agent-workflow` | Live failure-path smoke test | **passed**: missing ElectronHub key surfaced the exact keychain error; fallback and raw child JSONL/stderr were persisted |
 | `pi-agent-router` 0.9.0 | upstream utility/integration suite | **failed locally** at `session-paths-test.ts` (`493 !== 384`) after earlier suites passed; likely Node/platform-dependent, so not treated as a product-quality score |
 | `pi-multiagent` 0.9.8 | upstream test suite | **269 passed** |
 | `pi-analyst-worker-orchestrator` 0.1.18 | package load under its own dependencies | loaded; no `typecheck` or test script exposed by package |

@@ -63,6 +63,18 @@ function reportIsUnsuccessful(output: string): boolean {
   return /(?:^|\n)\s*(?:#+\s*)?result\s*:\s*(?:blocked|failed|incomplete|aborted|not complete)\b/i.test(output);
 }
 
+export function workerEvidenceError(task: string, toolsUsed: string[] | undefined): string | undefined {
+  const text = task.toLowerCase();
+  const tools = new Set(toolsUsed ?? []);
+  const explicitlyReadOnly = /\b(?:read[- ]only|without editing|no changes?)\b/.test(text) || /\bdo not (?:modify|edit|write) (?:anything|the repository|files)\b/.test(text);
+  const asksForMutation = !explicitlyReadOnly && /\b(?:implement|build|add|change|modify|edit|update|fix|refactor|write|create|remove|delete)\b/.test(text);
+  const asksForRepositoryEvidence = /\b(?:inspect|audit|search|find|check|test|validate|run|repository|repo|file|source|code|exact lines?)\b/.test(text);
+  if (asksForMutation && !["edit", "write", "bash"].some((tool) => tools.has(tool))) return "worker returned a mutation report without using an edit, write, or bash tool";
+  if (/\b(?:cat|run|execute|command|tests?)\b/.test(text) && !tools.has("bash")) return "worker did not perform the requested command or test validation with bash";
+  if (asksForRepositoryEvidence && tools.size === 0) return "worker returned a repository report without using any repository tool";
+  return undefined;
+}
+
 async function runOnce(ctx: ExtensionContext, decision: RouteDecision, prompt: string, timeoutMs: number, signal: AbortSignal, onEvent: (event: string) => void): Promise<ChildResult> {
   const started = Date.now();
   const args = [
@@ -150,9 +162,15 @@ export async function runJob(options: RuntimeOptions, job: Job, images: ImageAtt
   const attempts = Math.max(1, config.maxRetries + 1);
   for (let attempt = 1; attempt <= attempts; attempt++) {
     job.attempts = attempt;
+    job.toolUses = 0;
+    job.toolsUsed = [];
     const result = await runOnce(ctx, job.decision, prompt, config.timeoutMs, signal, (event) => {
       job.lastEvent = event;
-      if (event.startsWith("tool:")) job.toolUses = (job.toolUses ?? 0) + 1;
+      if (event.startsWith("tool:")) {
+        job.toolUses = (job.toolUses ?? 0) + 1;
+        const tool = event.slice(5);
+        job.toolsUsed = [...new Set([...(job.toolsUsed ?? []), tool])];
+      }
       job.currentTool = event.startsWith("tool:") ? event.slice(5) : undefined;
       jobs.set(job.id, job);
       render();
@@ -161,7 +179,8 @@ export async function runJob(options: RuntimeOptions, job: Job, images: ImageAtt
       await writeFile(join(artifactDir, `child-${attempt}.jsonl`), result.rawJsonl ?? "", "utf8");
       await writeFile(join(artifactDir, `stderr-${attempt}.txt`), result.stderr ?? "", "utf8");
     }
-    if (result.ok && !reportIsUnsuccessful(result.output)) {
+    const evidenceError = result.ok ? workerEvidenceError(job.task, job.toolsUsed) : undefined;
+    if (result.ok && !reportIsUnsuccessful(result.output) && !evidenceError) {
       job.status = "succeeded";
       job.output = trimOutput(result.output, config.maxOutputChars);
       job.finishedAt = new Date().toISOString();
@@ -170,7 +189,7 @@ export async function runJob(options: RuntimeOptions, job: Job, images: ImageAtt
       render();
       return job;
     }
-    lastError = result.ok ? "worker reported an unsuccessful result" : (result.error || "worker failed");
+    lastError = result.ok ? (evidenceError || "worker reported an unsuccessful result") : (result.error || "worker failed");
     if (attempt < attempts && job.decision.profile.fallback) {
       job.decision = { ...job.decision, reason: `${job.decision.reason}; fallback after attempt ${attempt}`, profile: { ...job.decision.profile, model: job.decision.profile.fallback } };
       if (artifactDir) await writeFile(join(artifactDir, "route.json"), JSON.stringify(job.decision, null, 2), "utf8");

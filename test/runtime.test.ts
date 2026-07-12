@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { protocolErrorFromJsonOutput, textFromJsonOutput } from "../src/runtime.js";
+import { protocolErrorFromJsonOutput, textFromJsonOutput, workerEvidenceError } from "../src/runtime.js";
 
 test("extracts assistant reports from Pi JSON mode", () => {
   const jsonl = [
@@ -22,4 +22,12 @@ test("extracts protocol errors even when Pi exits zero", () => {
   });
   assert.equal(textFromJsonOutput(jsonl), "");
   assert.match(protocolErrorFromJsonOutput(jsonl) ?? "", /Failed to resolve API key/);
+});
+
+test("requires actual tool evidence for requested repository work", () => {
+  assert.match(workerEvidenceError("change value.txt from 1 to 2; do not modify any other files", ["read"]) ?? "", /mutation report/);
+  assert.equal(workerEvidenceError("change value.txt from 1 to 2; do not modify any other files", ["read", "edit"]), undefined);
+  assert.match(workerEvidenceError("change value.txt and run cat value.txt to validate", ["write"] ) ?? "", /command or test validation/);
+  assert.equal(workerEvidenceError("change value.txt and run cat value.txt to validate", ["write", "bash"]), undefined);
+  assert.match(workerEvidenceError("inspect the repository and report findings", []) ?? "", /repository tool/);
 });

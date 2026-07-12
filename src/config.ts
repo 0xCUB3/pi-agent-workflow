@@ -12,7 +12,7 @@ export const DEFAULT_CONFIG: WorkflowConfig = {
   enabled: true,
   maxConcurrent: 1,
   timeoutMs: 30 * 60_000,
-  maxOutputChars: 24_000,
+  maxOutputChars: 8_000,
   maxRetries: 1,
   persistArtifacts: true,
   profiles: {

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { protocolErrorFromJsonOutput, textFromJsonOutput, workerEvidenceError } from "../src/runtime.js";
+import { parseWorkerMessage, protocolErrorFromJsonOutput, textFromJsonOutput, workerEvidenceError } from "../src/runtime.js";
 
 test("extracts assistant reports from Pi JSON mode", () => {
   const jsonl = [
@@ -22,6 +22,12 @@ test("extracts protocol errors even when Pi exits zero", () => {
   });
   assert.equal(textFromJsonOutput(jsonl), "");
   assert.match(protocolErrorFromJsonOutput(jsonl) ?? "", /Failed to resolve API key/);
+});
+
+test("parses bounded worker message signals", () => {
+  assert.deepEqual(parseWorkerMessage("progress\nWORKFLOW_ASK: Need the target branch"), { kind: "ask", message: "Need the target branch" });
+  assert.deepEqual(parseWorkerMessage("WORKFLOW_TO: w1234abcd: Please inspect the failing test"), { kind: "peer", target: "w1234abcd", message: "Please inspect the failing test" });
+  assert.equal(parseWorkerMessage("ordinary progress"), undefined);
 });
 
 test("requires actual tool evidence for requested repository work", () => {

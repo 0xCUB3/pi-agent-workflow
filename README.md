@@ -7,7 +7,7 @@ One orchestrator. Automatically routed workers. Evidence before confidence.
 ## Philosophy
 
 - **The parent decides.** The active Pi session remains the analyst and final authority.
-- **Workers are disposable.** A worker gets one bounded task, a narrow prompt, and built-in tools. It cannot recursively delegate.
+- **Workers are bounded.** A worker gets one bounded task, a narrow prompt, and built-in tools. It cannot recursively delegate, but it can be steered while running.
 - **Model choice is policy, not ceremony.** Routing is automatic and inspectable; users do not need to select a model per task.
 - **Evidence beats confidence.** A worker must report changes and validation. The parent must inspect the actual repository state before claiming success.
 - **Visual work is different.** Images go to a vision-capable worker first. A text-only analyst receives the resulting visual report, not a pretend visual interpretation.
@@ -31,13 +31,13 @@ The package is compatible with the `@earendil-works` Pi distribution and uses no
 
 ## How it works
 
-The parent model sees one tool:
+The parent model sees two workflow tools:
 
 ```text
-delegate_work({ task: "..." })
+delegate_work({ task: "...", async: true })  # optional background mode
 ```
 
-The extension classifies the bounded task, chooses a worker profile, launches a clean child Pi process, tracks it in a Claude-Code-style widget, retries with a fallback when appropriate, and returns a compact evidence report to the parent.
+The extension classifies the bounded task, chooses a worker profile, launches a clean RPC child Pi process, tracks streamed activity in a Claude-Code-style widget, supports steering and follow-ups while it runs, retries with a fallback when appropriate, and returns a compact evidence report to the parent.
 
 ```text
 user request
@@ -49,10 +49,10 @@ parent Pi session (analyst/orchestrator)
 delegate_work
     │  deterministic, inspectable routing
     ▼
-clean child Pi process ──► report + artifacts
-    │
+clean RPC child Pi process ◄── steering / follow-up
+    │  live tool activity + tagged worker messages
     ▼
-parent inspects evidence and decides what happens next
+report + artifacts ──► parent inspects evidence and decides what happens next
 ```
 
 Delegation is proactive by default: the parent is instructed to call `delegate_work` for substantial independent work without requiring the user to mention it. Say “don’t delegate”, “don’t use a worker”, or “do it yourself” to opt out for the current turn. The extension also blocks the tool during that opt-out turn. It does not silently run every prompt through another model; delegation remains a tool call so the parent can avoid unnecessary latency and context duplication.
@@ -90,14 +90,18 @@ The image check wins. A non-vision parent is never asked to hallucinate visual o
 ```text
 /workflow status   # recent and active workers
 /workflow config   # effective routing profiles and limits
+/workflow steer <job-id> <message> # steer a running worker
+/workflow followup <job-id> <message> # queue a follow-up
 /workflow doctor   # check model refs without making model calls
 /workflow doctor live # test configured model authentication
 /workflow stop     # cancel active workers
 ```
 
+For asynchronous jobs, the parent can call `workflow_message({ jobId, message, mode })` or use the `/workflow steer` and `/workflow followup` commands. Workers can surface live progress with `WORKFLOW_UPDATE:` and ask the parent with `WORKFLOW_ASK:`; a worker can relay to a peer with `WORKFLOW_TO: <job-id>: <message>`. These are bounded message channels, not unrestricted agent chatter.
+
 The UI intentionally follows the Claude Code-style `pi-subagents` pattern:
 
-- An animated, themed **Agents** widget above the editor with spinners, colored status icons, task summaries, model, attempts, elapsed time, tool count, and live activity (`⎿ reading…`, `⎿ editing…`).
+- An animated, themed **Agents** widget above the editor with spinners, colored status icons, task summaries, model, attempts, elapsed time, tool count, and live worker narration (`⎿ reading…`, `⎿ editing…`).
 - A navigable **fleet list** below the editor. At an empty prompt, press `↓` or `←`; use `↑`/`↓` to select a worker, `Enter` to open its live result viewer, and `Esc` to return.
 - Finished workers linger briefly so completion and errors are readable. The viewer updates while a worker is running.
 

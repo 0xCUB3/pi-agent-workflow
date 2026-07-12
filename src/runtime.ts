@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
@@ -8,12 +9,19 @@ import type { ChildResult, Job, RouteDecision, WorkflowConfig } from "./types.js
 
 export type ImageAttachment = { data: string; mimeType?: string };
 
+export type WorkerControl = {
+  steer(message: string): boolean;
+  followUp(message: string): boolean;
+};
+
 type RuntimeOptions = {
   pi: ExtensionAPI;
   ctx: ExtensionContext;
   config: WorkflowConfig;
   jobs: Map<string, Job>;
+  controls: Map<string, WorkerControl>;
   render: () => void;
+  onWorkerMessage?: (job: Job, message: string, kind: "update" | "ask" | "peer") => void;
 };
 
 export function textFromJsonOutput(stdout: string): string {
@@ -63,6 +71,13 @@ function reportIsUnsuccessful(output: string): boolean {
   return /(?:^|\n)\s*(?:#+\s*)?result\s*:\s*(?:blocked|failed|incomplete|aborted|not complete)\b/i.test(output);
 }
 
+export function parseWorkerMessage(text: string): { kind: "ask" | "peer"; message: string; target?: string } | undefined {
+  const ask = text.match(/(?:^|\n)\s*WORKFLOW_ASK:\s*(.+)/i)?.[1]?.trim();
+  if (ask) return { kind: "ask", message: ask };
+  const peer = text.match(/(?:^|\n)\s*WORKFLOW_TO:\s*([^:\s]+)\s*:\s*(.+)/i);
+  return peer ? { kind: "peer", target: peer[1], message: peer[2].trim() } : undefined;
+}
+
 export function workerEvidenceError(task: string, toolsUsed: string[] | undefined): string | undefined {
   const text = task.toLowerCase();
   const tools = new Set(toolsUsed ?? []);
@@ -77,15 +92,15 @@ export function workerEvidenceError(task: string, toolsUsed: string[] | undefine
   return undefined;
 }
 
-async function runOnce(ctx: ExtensionContext, decision: RouteDecision, prompt: string, timeoutMs: number, signal: AbortSignal, onEvent: (event: string) => void): Promise<ChildResult> {
+async function runOnce(ctx: ExtensionContext, decision: RouteDecision, prompt: string, timeoutMs: number, signal: AbortSignal, onEvent: (event: string) => void, registerControl: (control: WorkerControl) => void, onWorkerMessage?: (message: string, kind: "update" | "ask" | "peer") => void): Promise<ChildResult> {
   const started = Date.now();
   const args = [
-    "--mode", "json", "--no-session", "--no-extensions", "--no-skills",
+    "--mode", "rpc", "--no-session", "--no-extensions", "--no-skills",
     "--no-prompt-templates", "--no-context-files", "--model", decision.profile.model,
-    "--thinking", decision.profile.thinking, "--tools", "read,bash,edit,write", "-p", prompt,
+    "--thinking", decision.profile.thinking, "--tools", "read,bash,edit,write", "--name", `worker-${randomUUID().slice(0, 8)}`,
   ];
   return await new Promise((resolve) => {
-    const child = spawn("pi", args, { cwd: ctx.cwd, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn("pi", args, { cwd: ctx.cwd, stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     let buffer = "";
@@ -93,15 +108,41 @@ async function runOnce(ctx: ExtensionContext, decision: RouteDecision, prompt: s
     let timedOut = false;
     let settled = false;
     const finish = (result: ChildResult) => { if (!settled) { settled = true; resolve(result); } };
+    const send = (command: Record<string, unknown>): boolean => {
+      if (child.stdin.destroyed || child.stdin.writableEnded) return false;
+      child.stdin.write(`${JSON.stringify(command)}\n`);
+      return true;
+    };
+    registerControl({
+      steer: (message) => send({ type: "steer", message }),
+      followUp: (message) => send({ type: "follow_up", message }),
+    });
+    const contentText = (content: unknown): string => {
+      if (typeof content === "string") return content;
+      if (!Array.isArray(content)) return "";
+      return content.filter((part) => part && typeof part === "object" && (part as { type?: string }).type === "text" && typeof (part as { text?: unknown }).text === "string").map((part) => (part as { text: string }).text).join("\n");
+    };
     const handleLine = (line: string) => {
       if (!line.trim()) return;
       stdout = appendBounded(stdout, `${line}\n`, 4_000_000);
       try {
-        const event = JSON.parse(line) as { type?: string; toolName?: string; message?: { role?: string; content?: unknown } };
+        const event = JSON.parse(line) as { type?: string; toolName?: string; message?: { role?: string; content?: unknown }; assistantMessageEvent?: { type?: string; delta?: string; partial?: { content?: unknown } } };
         if (event.type === "tool_execution_start") onEvent(`tool:${event.toolName || "unknown"}`);
         else if (event.type === "tool_execution_end") onEvent(`done:${event.toolName || "unknown"}`);
         else if (event.type === "turn_start") onEvent("thinking");
-        else if (event.type === "message_end" && event.message?.role === "assistant") onEvent("reporting");
+        else if (event.type === "message_update" && event.assistantMessageEvent?.partial) {
+          const text = contentText(event.assistantMessageEvent.partial.content);
+          if (text) onWorkerMessage?.(text, "update");
+        } else if (event.type === "message_end" && event.message?.role === "assistant") {
+          onEvent("reporting");
+          const text = contentText(event.message.content);
+          const signal = parseWorkerMessage(text);
+          if (signal?.kind === "ask") onWorkerMessage?.(signal.message, "ask");
+          if (signal?.kind === "peer") onWorkerMessage?.(`${signal.target}::${signal.message}`, "peer");
+        } else if (event.type === "agent_settled") {
+          onEvent("settled");
+          child.stdin.end();
+        }
       } catch { /* diagnostics are retained in stdout */ }
     };
     child.stdout.on("data", (chunk: Buffer | string) => {
@@ -111,7 +152,11 @@ async function runOnce(ctx: ExtensionContext, decision: RouteDecision, prompt: s
       lines.forEach(handleLine);
     });
     child.stderr.on("data", (chunk: Buffer | string) => { stderr = appendBounded(stderr, chunk.toString(), 200_000); });
-    const abort = () => child.kill("SIGTERM");
+    send({ id: "initial", type: "prompt", message: prompt });
+    const abort = () => {
+      send({ type: "abort" });
+      child.kill("SIGTERM");
+    };
     signal.addEventListener("abort", abort, { once: true });
     const timer = setTimeout(() => { timedOut = true; child.kill("SIGTERM"); }, timeoutMs);
     child.on("error", (error) => {
@@ -132,7 +177,7 @@ async function runOnce(ctx: ExtensionContext, decision: RouteDecision, prompt: s
 }
 
 export async function runJob(options: RuntimeOptions, job: Job, images: ImageAttachment[], signal: AbortSignal): Promise<Job> {
-  const { pi, ctx, config, jobs, render } = options;
+  const { pi, ctx, config, jobs, controls, render, onWorkerMessage } = options;
   job.status = "running";
   job.startedAt = new Date().toISOString();
   jobs.set(job.id, job);
@@ -158,7 +203,9 @@ export async function runJob(options: RuntimeOptions, job: Job, images: ImageAtt
   const imageInstruction = images.length > 0
     ? `\n\nVisual attachments are available to you as files under ${artifactDir || ".pi/agent-workflow-runs/"}. Use the read tool on each image file before making visual claims. You are the visual-perception worker; return concrete observations and uncertainty.\n`
     : "";
-  const prompt = `You are a delegated ${job.decision.profile.label}.\n\n${job.decision.profile.description}\n\nRules:\n- Work only on the bounded task below.\n- Treat repository state and command output as evidence; do not invent files, tests, or results.\n- Make edits only when the task asks for implementation.\n- Run focused validation when practical.\n- End with a concise report containing: Result, Changes, Validation, Risks, Next step.\n- If blocked, say exactly what blocked you instead of pretending success.\n${imageInstruction}\nBounded task:\n${job.task}`;
+  const peers = [...jobs.values()].filter((peer) => peer.id !== job.id && (peer.status === "running" || peer.status === "queued"));
+  const peerInstruction = peers.length ? `\nPeer roster (message only these ids):\n${peers.map((peer) => `- ${peer.id}: ${peer.task.replace(/\s+/g, " ").slice(0, 100)}`).join("\n")}\n` : "\nPeer roster: none.\n";
+  const prompt = `You are a delegated ${job.decision.profile.label}.\n\n${job.decision.profile.description}\n\nRules:\n- Work only on the bounded task below.\n- Treat repository state and command output as evidence; do not invent files, tests, or results.\n- Make edits only when the task asks for implementation.\n- Run focused validation when practical.\n- End with a concise report containing: Result, Changes, Validation, Risks, Next step.\n- If blocked, say exactly what blocked you instead of pretending success.\n- You may report concise live progress with a line beginning \`WORKFLOW_UPDATE:\`.\n- If you need a decision from the parent, emit \`WORKFLOW_ASK: <question>\` and continue only with safe, reversible work.\n- To send a concise message to another running worker, emit \`WORKFLOW_TO: <worker-id>: <message>\` after checking the peer roster below.\n${imageInstruction}${peerInstruction}\nBounded task:\n${job.task}`;
 
   let lastError = "";
   const attempts = Math.max(1, config.maxRetries + 1);
@@ -176,7 +223,8 @@ export async function runJob(options: RuntimeOptions, job: Job, images: ImageAtt
       job.currentTool = event.startsWith("tool:") ? event.slice(5) : undefined;
       jobs.set(job.id, job);
       render();
-    });
+    }, (control) => controls.set(job.id, control), (message, kind) => onWorkerMessage?.(job, message, kind));
+    controls.delete(job.id);
     if (artifactDir) {
       await writeFile(join(artifactDir, `child-${attempt}.jsonl`), result.rawJsonl ?? "", "utf8");
       await writeFile(join(artifactDir, `stderr-${attempt}.txt`), result.stderr ?? "", "utf8");

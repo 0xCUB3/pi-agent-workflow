@@ -50,6 +50,8 @@ export type Job = {
   lastEvent?: string;
   toolUses?: number;
   toolsUsed?: string[];
+  lastMessage?: string;
+  messageCount?: number;
 };
 
 export type ChildResult = {

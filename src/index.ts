@@ -15,7 +15,7 @@ Delegation is proactive by default. When a request involves repository explorati
 
 Routing is automatic: visual input goes to the vision worker; architecture/UI goes to the design worker; substantive code goes to the implementation worker; research/math goes to the research worker; exploration/tests go to the fast worker; tiny mechanical work goes to the trivial worker. Do not ask the user to choose a model.
 
-Treat worker output as evidence, never as authority. Inspect the actual diff and validation yourself before claiming success. If a worker fails, narrow the task or retry; never paper over an incomplete result. The worker must not recursively delegate.
+Treat worker output as evidence, never as authority. Inspect the actual diff and validation yourself before claiming success. If a worker fails, narrow the task or retry; never paper over an incomplete result. The worker must not recursively delegate. For long-running work, pass \`async: true\` to delegate_work; use workflow_message to steer a running worker, and treat asynchronously delivered worker messages as evidence rather than authority.
 `;
 
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -65,6 +65,7 @@ function renderWorkflowWidget(tui: any, theme: WorkflowTheme, jobs: Map<string, 
     const stats = [`↻${job.attempts}`, `${job.toolUses ?? 0} tool use${job.toolUses === 1 ? "" : "s"}`, jobDuration(job)].join(" · ");
     body.push(truncate(theme.fg("dim", "├─") + ` ${theme.fg("accent", SPINNER[frame % SPINNER.length])} ${theme.bold(routeLabel(job.decision.kind))}  ${theme.fg("muted", jobTask(job))} ${theme.fg("dim", "·")} ${theme.fg("dim", `${model} · ${stats}`)}`));
     body.push(truncate(theme.fg("dim", "│  ") + theme.fg("dim", `  ⎿  ${jobActivity(job)}`)));
+    if (job.lastMessage) body.push(truncate(theme.fg("dim", "│  ") + theme.fg("muted", `  ${job.lastMessage}`)));
   }
   if (queued.length) body.push(truncate(theme.fg("dim", "├─") + ` ${theme.fg("muted", "◦")} ${theme.fg("dim", `${queued.length} queued`)}`));
   for (const job of finished) {
@@ -101,6 +102,7 @@ function renderJobViewer(width: number, theme: WorkflowTheme, job: Job): string[
     "",
     theme.bold("Activity"),
     job.currentTool ? `⎿ ${TOOL_ACTIVITY[job.currentTool] ?? job.currentTool}…` : `⎿ ${jobActivity(job)}`,
+    ...(job.lastMessage ? [theme.fg("muted", job.lastMessage)] : []),
     "",
     theme.bold(job.status === "failed" ? "Error" : "Result"),
     ...(job.status === "failed" ? [job.error ?? "Unknown worker error"] : [job.output ?? "Worker is still running…"]),
@@ -113,6 +115,13 @@ export default function piAgentWorkflow(pi: ExtensionAPI) {
   const jobs = new Map<string, Job>();
   const controllers = new Map<string, AbortController>();
   let config = undefined as Awaited<ReturnType<typeof loadConfig>> | undefined;
+  const controls = new Map<string, { steer(message: string): boolean; followUp(message: string): boolean }>();
+  const sendParentMessage = (customType: string, content: string, details: unknown, deliverAs: "steer" | "followUp") => {
+    if (!activeCtx) return;
+    try {
+      void Promise.resolve(pi.sendMessage({ customType, content, display: true, details }, { deliverAs, triggerTurn: true })).catch(() => {});
+    } catch { /* the session may have been replaced while a worker was finishing */ }
+  };
   let latestImages: ImageAttachment[] = [];
   let delegationOptOut = false;
   let queue: ReturnType<typeof createQueue> | undefined;
@@ -226,6 +235,8 @@ export default function piAgentWorkflow(pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async () => {
+    for (const controller of controllers.values()) controller.abort();
+    controls.clear();
     activeCtx = undefined;
     if (widgetTimer) { clearInterval(widgetTimer); widgetTimer = undefined; }
     for (const timer of cleanupTimers) clearTimeout(timer);
@@ -261,38 +272,81 @@ export default function piAgentWorkflow(pi: ExtensionAPI) {
     description: "Delegate one bounded coding, research, testing, design, exploration, or visual-perception task. The extension automatically chooses the cheapest suitable worker model, retries with a fallback, tracks the run, and returns a concise evidence report. Use this proactively for substantial independent work; never specify a model.",
     parameters: Type.Object({
       task: Type.String({ description: "A bounded task with clear files/scope, validation expectations, and a concise desired report." }),
+      async: Type.Optional(Type.Boolean({ description: "Return immediately and deliver the final handoff asynchronously." })),
     }),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       if (!config) config = await loadConfig(ctx);
       if (delegationOptOut) return { content: [{ type: "text", text: "Delegation skipped: the user opted out for this turn." }], details: { skipped: true, reason: "user_opt_out" } };
       if (!config.enabled) return { content: [{ type: "text", text: "Delegation is disabled in .pi/agent-workflow.json." }], details: { disabled: true } };
+      const workflowConfig = config;
       const decision = routeTask({ task: params.task, hasImages: latestImages.length > 0, imageCount: latestImages.length }, config);
       const job: Job = { id: `w${randomUUID().slice(0, 8)}`, task: params.task, decision, status: "queued", attempts: 0 };
       jobs.set(job.id, job);
       const controller = new AbortController();
-      const parentSignal = signal ?? new AbortController().signal;
-      if (parentSignal.aborted) controller.abort();
+      const asyncMode = params.async === true;
+      const parentSignal = asyncMode ? undefined : (signal ?? new AbortController().signal);
+      if (parentSignal?.aborted) controller.abort();
       controllers.set(job.id, controller);
       const abortOnParent = () => controller.abort();
-      parentSignal.addEventListener("abort", abortOnParent, { once: true });
+      parentSignal?.addEventListener("abort", abortOnParent, { once: true });
       refresh(ctx);
-      try {
-        const run = queue ?? createQueue(config.maxConcurrent);
-        const result = await run(() => runJob({ pi, ctx, config: config!, jobs, render: () => { if (activeCtx) refresh(activeCtx); } }, job, latestImages, controller.signal));
-        const heading = `${result.status === "succeeded" ? "Worker complete" : "Worker did not complete"} · ${result.id} · ${routeLabel(result.decision.kind)} · ${result.decision.profile.model}`;
-        const body = result.status === "succeeded" ? result.output ?? "Worker returned no report." : `Error: ${result.error ?? "unknown worker failure"}`;
-        return { content: [{ type: "text", text: `${heading}\nRouting: ${result.decision.reason}\nAttempts: ${result.attempts}\n\n${body}` }], details: { job: result } };
-      } finally {
-        parentSignal.removeEventListener("abort", abortOnParent);
-        controllers.delete(job.id);
-        if (activeCtx) refresh(activeCtx);
-        const cleanup = setTimeout(() => {
-          cleanupTimers.delete(cleanup);
+      const executeRun = async () => {
+        try {
+          const run = queue ?? createQueue(workflowConfig.maxConcurrent);
+          const result = await run(() => runJob({ pi, ctx, config: config!, jobs, controls, render: () => { if (activeCtx) refresh(activeCtx); }, onWorkerMessage: (worker, message, kind) => {
+            worker.lastMessage = message.length > 240 ? `${message.slice(0, 239)}…` : message;
+            worker.messageCount = (worker.messageCount ?? 0) + 1;
+            jobs.set(worker.id, worker);
+            if (activeCtx) refresh(activeCtx);
+            if (kind === "ask") sendParentMessage("pi-agent-workflow-worker", `Worker ${worker.id} asks: ${message}`, { jobId: worker.id, kind }, "steer");
+            if (kind === "peer") {
+              const separator = message.indexOf("::");
+              const target = separator >= 0 ? message.slice(0, separator) : "";
+              const peerMessage = separator >= 0 ? message.slice(separator + 2) : message;
+              const sent = Boolean(target && controls.get(target)?.steer(peerMessage));
+              sendParentMessage("pi-agent-workflow-worker", `Worker ${worker.id} ${sent ? "messaged" : "could not message"} ${target || "peer"}: ${peerMessage}`, { jobId: worker.id, target, sent, kind }, "steer");
+            }
+          } }, job, latestImages, controller.signal));
+          const heading = `${result.status === "succeeded" ? "Worker complete" : "Worker did not complete"} · ${result.id} · ${routeLabel(result.decision.kind)} · ${result.decision.profile.model}`;
+          const body = result.status === "succeeded" ? result.output ?? "Worker returned no report." : `Error: ${result.error ?? "unknown worker failure"}`;
+          return { content: [{ type: "text" as const, text: `${heading}\nRouting: ${result.decision.reason}\nAttempts: ${result.attempts}\n\n${body}` }], details: { job: result } };
+        } finally {
+          parentSignal?.removeEventListener("abort", abortOnParent);
+          controllers.delete(job.id);
+          controls.delete(job.id);
           if (activeCtx) refresh(activeCtx);
-        }, 8_100);
-        cleanupTimers.add(cleanup);
-        cleanup.unref?.();
+          const cleanup = setTimeout(() => {
+            cleanupTimers.delete(cleanup);
+            if (activeCtx) refresh(activeCtx);
+          }, 8_100);
+          cleanupTimers.add(cleanup);
+          cleanup.unref?.();
+        }
+      };
+      if (asyncMode) {
+        void executeRun().then((result) => sendParentMessage("pi-agent-workflow-result", result.content[0]?.text ?? "Worker finished.", result.details, "followUp"), () => {});
+        return { content: [{ type: "text", text: `Worker queued · ${job.id} · ${routeLabel(decision.kind)}. Use workflow_message or /workflow steer ${job.id} <message> while it runs.` }], details: { job, async: true } };
       }
+      return executeRun();
+    },
+  });
+
+  pi.registerTool({
+    name: "workflow_message",
+    label: "Message worker",
+    description: "Send a steering or follow-up message to a currently running workflow worker.",
+    parameters: Type.Object({
+      jobId: Type.String({ description: "Running worker id, for example w1234abcd." }),
+      message: Type.String({ description: "Instruction or question for the worker." }),
+      mode: Type.Optional(Type.String({ description: "steer (default) or follow_up." })),
+    }),
+    async execute(_toolCallId, params) {
+      const mode = params.mode === "follow_up" ? "follow_up" : "steer";
+      const control = controls.get(params.jobId);
+      const job = jobs.get(params.jobId);
+      if (!control || !job || job.status !== "running") return { content: [{ type: "text", text: `No running worker found for ${params.jobId}.` }], details: { sent: false, jobId: params.jobId, mode } };
+      const sent = mode === "follow_up" ? control.followUp(params.message) : control.steer(params.message);
+      return { content: [{ type: "text", text: sent ? `Message sent to ${params.jobId}.` : `Worker ${params.jobId} is no longer accepting messages.` }], details: { sent, jobId: params.jobId, mode } };
     },
   });
 
@@ -304,6 +358,14 @@ export default function piAgentWorkflow(pi: ExtensionAPI) {
       if (command === "stop") {
         for (const controller of controllers.values()) controller.abort();
         ctx.ui.notify("Stopping active workers…", "info");
+        return;
+      }
+      if (command === "steer" || command === "followup") {
+        const [, jobId, ...messageParts] = args.trim().split(/\s+/);
+        const message = messageParts.join(" ").trim();
+        const control = jobId ? controls.get(jobId) : undefined;
+        const sent = Boolean(control && message && (command === "followup" ? control.followUp(message) : control.steer(message)));
+        ctx.ui.notify(sent ? `Message sent to ${jobId}.` : `Usage: /workflow ${command} <job-id> <message>`, sent ? "info" : "warning");
         return;
       }
       if (command === "config") {

@@ -90,6 +90,8 @@ The image check wins. A non-vision parent is never asked to hallucinate visual o
 ```text
 /workflow status   # recent and active workers
 /workflow config   # effective routing profiles and limits
+/workflow doctor   # check model refs without making model calls
+/workflow doctor live # test configured model authentication
 /workflow stop     # cancel active workers
 ```
 

@@ -4,7 +4,7 @@ import { isKeyRelease, Key, matchesKey, truncateToWidth } from "@earendil-works/
 import { Type } from "typebox";
 import { loadConfig, profileSummary } from "./config.js";
 import { routeLabel, routeTask } from "./router.js";
-import { createQueue, runJob, type ImageAttachment } from "./runtime.js";
+import { createQueue, protocolErrorFromJsonOutput, runJob, textFromJsonOutput, type ImageAttachment } from "./runtime.js";
 import type { Job } from "./types.js";
 
 const WORKFLOW_PROMPT = `
@@ -308,6 +308,24 @@ export default function piAgentWorkflow(pi: ExtensionAPI) {
       }
       if (command === "config") {
         ctx.ui.notify([`Concurrency: ${config.maxConcurrent}`, `Timeout: ${Math.round(config.timeoutMs / 60_000)}m`, `Retries: ${config.maxRetries}`, ...profileSummary(config)].join("\n"), "info");
+        return;
+      }
+      if (command === "doctor") {
+        const live = args.split(/\s+/).includes("live");
+        const models = [...new Set(Object.values(config.profiles).flatMap((profile) => [profile.model, ...(profile.fallback ? [profile.fallback] : [])]))];
+        if (!live) {
+          const listed = await pi.exec("pi", ["--list-models"], { cwd: ctx.cwd, timeout: 20_000 });
+          const missing = models.filter((model) => !listed.stdout.includes(model.split("/").at(-1) ?? model));
+          ctx.ui.notify(missing.length ? `Model registry check: missing\n${missing.join("\n")}\n\nUse /workflow doctor live to test authentication.` : `Model registry check: all ${models.length} configured model refs are present.\n\nUse /workflow doctor live to test authentication.`, missing.length ? "warning" : "info");
+          return;
+        }
+        const lines: string[] = [];
+        for (const model of models) {
+          const result = await pi.exec("pi", ["--mode", "json", "--no-session", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files", "--model", model, "--thinking", "off", "--tools", "read", "-p", "Respond with exactly OK."], { cwd: ctx.cwd, timeout: 45_000 });
+          const error = protocolErrorFromJsonOutput(result.stdout);
+          lines.push(error ? `✗ ${model} — ${error}` : textFromJsonOutput(result.stdout) ? `✓ ${model}` : `✗ ${model} — no assistant response`);
+        }
+        ctx.ui.notify(lines.join("\n"), lines.some((line) => line.startsWith("✗")) ? "warning" : "info");
         return;
       }
       if (command === "status") {

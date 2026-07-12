@@ -49,6 +49,7 @@ export type Job = {
   currentTool?: string;
   lastEvent?: string;
   toolUses?: number;
+  toolsUsed?: string[];
 };
 
 export type ChildResult = {

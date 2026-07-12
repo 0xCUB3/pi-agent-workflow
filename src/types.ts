@@ -48,6 +48,7 @@ export type Job = {
   artifactDir?: string;
   currentTool?: string;
   lastEvent?: string;
+  toolUses?: number;
 };
 
 export type ChildResult = {
@@ -58,4 +59,6 @@ export type ChildResult = {
   timedOut: boolean;
   durationMs: number;
   usage?: { input?: number; output?: number; total?: number };
+  rawJsonl?: string;
+  stderr?: string;
 };

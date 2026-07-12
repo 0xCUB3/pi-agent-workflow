@@ -16,7 +16,7 @@ type RuntimeOptions = {
   render: () => void;
 };
 
-function textFromJsonOutput(stdout: string): string {
+export function textFromJsonOutput(stdout: string): string {
   const messages: string[] = [];
   for (const line of stdout.split(/\r?\n/)) {
     if (!line.trim()) continue;
@@ -34,13 +34,33 @@ function textFromJsonOutput(stdout: string): string {
   return messages.at(-1)?.trim() ?? "";
 }
 
+export function protocolErrorFromJsonOutput(stdout: string): string | undefined {
+  for (const line of stdout.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try {
+      const event = JSON.parse(line) as {
+        type?: string;
+        message?: { stopReason?: string; errorMessage?: string };
+        messages?: Array<{ stopReason?: string; errorMessage?: string }>;
+      };
+      const candidates = [event.message, ...(event.messages ?? [])].filter(Boolean) as Array<{ stopReason?: string; errorMessage?: string}>;
+      for (const message of candidates) {
+        if (message.stopReason === "error" || message.errorMessage) {
+          return message.errorMessage || "child agent reported an error";
+        }
+      }
+    } catch { /* non-JSON diagnostic line */ }
+  }
+  return undefined;
+}
+
 function trimOutput(output: string, maxChars: number): string {
   if (output.length <= maxChars) return output;
   return `${output.slice(0, maxChars)}\n\n[output truncated by pi-agent-workflow]`;
 }
 
 function reportIsUnsuccessful(output: string): boolean {
-  return /(?:^|\\n)\\s*(?:#+\\s*)?result\\s*:\\s*(?:blocked|failed|incomplete|aborted|not complete)\\b/i.test(output);
+  return /(?:^|\n)\s*(?:#+\s*)?result\s*:\s*(?:blocked|failed|incomplete|aborted|not complete)\b/i.test(output);
 }
 
 async function runOnce(ctx: ExtensionContext, decision: RouteDecision, prompt: string, timeoutMs: number, signal: AbortSignal, onEvent: (event: string) => void): Promise<ChildResult> {
@@ -82,15 +102,17 @@ async function runOnce(ctx: ExtensionContext, decision: RouteDecision, prompt: s
     const timer = setTimeout(() => { timedOut = true; child.kill("SIGTERM"); }, timeoutMs);
     child.on("error", (error) => {
       clearTimeout(timer); signal.removeEventListener("abort", abort);
-      finish({ ok: false, output: textFromJsonOutput(stdout), error: error.message, exitCode: 1, timedOut, durationMs: Date.now() - started });
+      finish({ ok: false, output: textFromJsonOutput(stdout), error: error.message, exitCode: 1, timedOut, durationMs: Date.now() - started, rawJsonl: stdout, stderr });
     });
     child.on("close", (code) => {
       clearTimeout(timer); signal.removeEventListener("abort", abort);
       if (buffer) handleLine(buffer);
       const output = textFromJsonOutput(stdout);
-      if (code !== 0 || timedOut || signal.aborted) finish({ ok: false, output, error: trimOutput(stderr || output || `child exited with code ${code}`, 8_000), exitCode: code ?? 1, timedOut, durationMs: Date.now() - started });
-      else if (!output) finish({ ok: false, output: "", error: "child produced no assistant result", exitCode: code ?? 0, timedOut: false, durationMs: Date.now() - started });
-      else finish({ ok: true, output, exitCode: code ?? 0, timedOut: false, durationMs: Date.now() - started });
+      const protocolError = protocolErrorFromJsonOutput(stdout);
+      const error = protocolError ? `child model error: ${protocolError}` : trimOutput(stderr || output || `child exited with code ${code}`, 8_000);
+      if (code !== 0 || timedOut || signal.aborted || protocolError) finish({ ok: false, output, error, exitCode: code ?? 1, timedOut, durationMs: Date.now() - started, rawJsonl: stdout, stderr });
+      else if (!output) finish({ ok: false, output: "", error: "child produced no assistant result", exitCode: code ?? 0, timedOut: false, durationMs: Date.now() - started, rawJsonl: stdout, stderr });
+      else finish({ ok: true, output, exitCode: code ?? 0, timedOut: false, durationMs: Date.now() - started, rawJsonl: stdout, stderr });
     });
   });
 }
@@ -130,10 +152,15 @@ export async function runJob(options: RuntimeOptions, job: Job, images: ImageAtt
     job.attempts = attempt;
     const result = await runOnce(ctx, job.decision, prompt, config.timeoutMs, signal, (event) => {
       job.lastEvent = event;
+      if (event.startsWith("tool:")) job.toolUses = (job.toolUses ?? 0) + 1;
       job.currentTool = event.startsWith("tool:") ? event.slice(5) : undefined;
       jobs.set(job.id, job);
       render();
     });
+    if (artifactDir) {
+      await writeFile(join(artifactDir, `child-${attempt}.jsonl`), result.rawJsonl ?? "", "utf8");
+      await writeFile(join(artifactDir, `stderr-${attempt}.txt`), result.stderr ?? "", "utf8");
+    }
     if (result.ok && !reportIsUnsuccessful(result.output)) {
       job.status = "succeeded";
       job.output = trimOutput(result.output, config.maxOutputChars);
@@ -146,6 +173,7 @@ export async function runJob(options: RuntimeOptions, job: Job, images: ImageAtt
     lastError = result.ok ? "worker reported an unsuccessful result" : (result.error || "worker failed");
     if (attempt < attempts && job.decision.profile.fallback) {
       job.decision = { ...job.decision, reason: `${job.decision.reason}; fallback after attempt ${attempt}`, profile: { ...job.decision.profile, model: job.decision.profile.fallback } };
+      if (artifactDir) await writeFile(join(artifactDir, "route.json"), JSON.stringify(job.decision, null, 2), "utf8");
     }
   }
   job.status = signal.aborted ? "cancelled" : "failed";

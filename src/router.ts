@@ -17,6 +17,9 @@ export function routeTask(input: RouteInput, config: WorkflowConfig): RouteDecis
   } else if (word(text, /paper|arxiv|literature|citation|prove|theorem|derive|mathematical|research|survey|compare sources|code archaeology/)) {
     kind = "research";
     reason = "research or mathematical reasoning language detected";
+  } else if (word(text, /inspect|search|find|check|identify|determine|report|whether|only .*update|no .*change/) && !word(text, /\b(implement|build|add|edit|modify|refactor|debug|fix|feature|migration|endpoint|hook|class|function|write code)\b/)) {
+    kind = "fast";
+    reason = "read-only repository inspection or evidence gathering detected";
   } else if (word(text, /implement|build|add|update|change|modify|refactor|debug|fix|feature|migration|endpoint|hook|class|function|multi-file|write code/)) {
     kind = "implement";
     reason = "substantive implementation language detected";

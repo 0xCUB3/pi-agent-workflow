@@ -93,13 +93,19 @@ The image check wins. A non-vision parent is never asked to hallucinate visual o
 /workflow stop     # cancel active workers
 ```
 
-The widget above the editor shows active workers, selected profile/model, completion state, and recent jobs. Each run writes inspectable artifacts under:
+The UI intentionally follows the Claude Code-style `pi-subagents` pattern:
+
+- An animated, themed **Agents** widget above the editor with spinners, colored status icons, task summaries, model, attempts, elapsed time, tool count, and live activity (`⎿ reading…`, `⎿ editing…`).
+- A navigable **fleet list** below the editor. At an empty prompt, press `↓` or `←`; use `↑`/`↓` to select a worker, `Enter` to open its live result viewer, and `Esc` to return.
+- Finished workers linger briefly so completion and errors are readable. The viewer updates while a worker is running.
+
+Each run writes inspectable artifacts under:
 
 ```text
 .pi/agent-workflow-runs/<job-id>/
 ```
 
-Artifacts include the task, route decision, visual attachments when present, worker result, and failure diagnostics.
+Artifacts include the task, route decision, visual attachments when present, worker result, bounded child JSONL/stderr captures, and failure diagnostics. Provider/authentication failures are preserved verbatim—for example, a missing ElectronHub key reports the failing keychain lookup instead of being mislabeled as an empty worker response.
 
 ## Configuration
 

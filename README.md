@@ -55,7 +55,7 @@ clean child Pi process ──► report + artifacts
 parent inspects evidence and decides what happens next
 ```
 
-The extension does not silently run every prompt through another model. Delegation remains a tool call so the parent can avoid unnecessary latency and context duplication.
+Delegation is proactive by default: the parent is instructed to call `delegate_work` for substantial independent work without requiring the user to mention it. Say “don’t delegate”, “don’t use a worker”, or “do it yourself” to opt out for the current turn. The extension also blocks the tool during that opt-out turn. It does not silently run every prompt through another model; delegation remains a tool call so the parent can avoid unnecessary latency and context duplication.
 
 ## Default workers
 

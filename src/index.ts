@@ -10,7 +10,7 @@ const WORKFLOW_PROMPT = `
 ## pi-agent-workflow delegation
 You are the orchestrator. You have one delegation tool, delegate_work, that launches a bounded worker using an automatically selected model.
 
-Delegate proactively when repository exploration, implementation, testing, visual inspection, research, or repetitive work can be done independently. Keep each delegation narrow and verifiable. Do not delegate tiny questions that you can answer directly.
+Delegation is proactive by default. When a request involves repository exploration, implementation, testing, visual inspection, research, or repetitive work that can be done independently, call delegate_work without waiting for the user to say “delegate”. Keep each delegation narrow and verifiable. Do not delegate tiny questions, direct explanations, or conversation that you can answer directly. If the user explicitly says not to delegate, not to use a worker/subagent, or to do it yourself, do not call delegate_work for that turn.
 
 Routing is automatic: visual input goes to the vision worker; architecture/UI goes to the design worker; substantive code goes to the implementation worker; research/math goes to the research worker; exploration/tests go to the fast worker; tiny mechanical work goes to the trivial worker. Do not ask the user to choose a model.
 
@@ -44,6 +44,7 @@ export default function piAgentWorkflow(pi: ExtensionAPI) {
   const controllers = new Map<string, AbortController>();
   let config = undefined as Awaited<ReturnType<typeof loadConfig>> | undefined;
   let latestImages: ImageAttachment[] = [];
+  let delegationOptOut = false;
   let queue: ReturnType<typeof createQueue> | undefined;
 
   const refresh = (ctx: ExtensionContext) => {
@@ -61,7 +62,9 @@ export default function piAgentWorkflow(pi: ExtensionAPI) {
   });
 
   pi.on("input", async (event) => {
-    latestImages = Array.isArray(event.images) ? event.images.map((image: any) => ({ data: String(image.data ?? image.source?.data ?? ""), mimeType: image.mimeType ?? image.source?.mediaType })) .filter((image) => image.data) : [];
+    const text = typeof event.text === "string" ? event.text : "";
+    delegationOptOut = /\b(?:don['’]t|do not|without|no)\b[\s\S]{0,40}\b(?:delegate|worker|subagent|agent)\b/i.test(text) || /\bdo it yourself\b/i.test(text);
+    latestImages = Array.isArray(event.images) ? event.images.map((image: any) => ({ data: String(image.data ?? image.source?.data ?? ""), mimeType: image.mimeType ?? image.source?.mediaType })).filter((image) => image.data) : [];
     return undefined;
   });
 
@@ -69,7 +72,8 @@ export default function piAgentWorkflow(pi: ExtensionAPI) {
     if (!config) config = await loadConfig(ctx);
     if (!config.enabled) return undefined;
     const imageNote = latestImages.length ? `\nThis turn has ${latestImages.length} image attachment(s). If work is needed, delegate visual perception before asking a non-vision worker to reason about the result.` : "";
-    return { systemPrompt: event.systemPrompt + WORKFLOW_PROMPT + imageNote };
+    const optOutNote = delegationOptOut ? "\nIMPORTANT: The user opted out of delegation for this turn. Do the work in this parent session and do not call delegate_work." : "";
+    return { systemPrompt: event.systemPrompt + WORKFLOW_PROMPT + imageNote + optOutNote };
   });
 
   pi.registerTool({
@@ -81,6 +85,7 @@ export default function piAgentWorkflow(pi: ExtensionAPI) {
     }),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       if (!config) config = await loadConfig(ctx);
+      if (delegationOptOut) return { content: [{ type: "text", text: "Delegation skipped: the user opted out for this turn." }], details: { skipped: true, reason: "user_opt_out" } };
       if (!config.enabled) return { content: [{ type: "text", text: "Delegation is disabled in .pi/agent-workflow.json." }], details: { disabled: true } };
       const decision = routeTask({ task: params.task, hasImages: latestImages.length > 0, imageCount: latestImages.length }, config);
       const job: Job = { id: `w${randomUUID().slice(0, 8)}`, task: params.task, decision, status: "queued", attempts: 0 };

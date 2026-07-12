@@ -1,10 +1,26 @@
+import { BUILT_IN_KINDS } from "./config.js";
 import type { RouteDecision, RouteInput, WorkerKind, WorkflowConfig } from "./types.js";
 
 const word = (text: string, pattern: RegExp) => pattern.test(text);
 
 /** Deterministic routing keeps model selection inspectable and testable. */
+function triggerMatches(text: string, trigger: string): boolean {
+  const normalized = trigger.trim().toLowerCase();
+  if (!normalized) return false;
+  return normalized.includes(" ") ? text.includes(normalized) : new RegExp(`\\b${normalized.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}\\b`, "i").test(text);
+}
+
 export function routeTask(input: RouteInput, config: WorkflowConfig): RouteDecision {
   const text = input.task.toLowerCase();
+  const customMatches = Object.entries(config.profiles)
+    .filter(([kind, profile]) => !BUILT_IN_KINDS.includes(kind) && (profile.triggers?.length ?? 0) > 0)
+    .map(([kind, profile]) => ({ kind, profile, matches: (profile.triggers ?? []).filter((trigger) => triggerMatches(text, trigger)) }))
+    .filter((candidate) => candidate.matches.length > 0)
+    .sort((a, b) => (b.matches.length * 100 + (b.profile.priority ?? 0)) - (a.matches.length * 100 + (a.profile.priority ?? 0)));
+  if (customMatches.length) {
+    const selected = customMatches[0];
+    return { kind: selected.kind, reason: `user profile matched: ${selected.matches.join(", ")}`, profile: selected.profile };
+  }
   let kind: WorkerKind;
   let reason: string;
 
@@ -35,5 +51,5 @@ export function routeTask(input: RouteInput, config: WorkflowConfig): RouteDecis
 }
 
 export function routeLabel(kind: WorkerKind): string {
-  return ({ fast: "FAST", implement: "IMPLEMENT", design: "DESIGN", vision: "VISION", research: "RESEARCH", trivial: "TRIVIAL" })[kind];
+  return ({ fast: "FAST", implement: "IMPLEMENT", design: "DESIGN", vision: "VISION", research: "RESEARCH", trivial: "TRIVIAL" } as Record<string, string>)[kind] ?? kind.replace(/[-_]+/g, " ").toUpperCase();
 }

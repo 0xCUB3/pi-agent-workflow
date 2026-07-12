@@ -1,4 +1,4 @@
-export type WorkerKind = "fast" | "implement" | "design" | "vision" | "research" | "trivial";
+export type WorkerKind = string;
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
 export type WorkerProfile = {
@@ -8,6 +8,9 @@ export type WorkerProfile = {
   thinking: ThinkingLevel;
   fallback?: string;
   description: string;
+  instructions?: string;
+  triggers?: string[];
+  priority?: number;
 };
 
 export type WorkflowConfig = {
@@ -17,7 +20,7 @@ export type WorkflowConfig = {
   maxOutputChars: number;
   maxRetries: number;
   persistArtifacts: boolean;
-  profiles: Record<WorkerKind, WorkerProfile>;
+  profiles: Record<string, WorkerProfile>;
 };
 
 export type RouteInput = {

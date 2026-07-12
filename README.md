@@ -57,20 +57,20 @@ report + artifacts ──► parent inspects evidence and decides what happens n
 
 Delegation is proactive by default: the parent is instructed to call `delegate_work` for substantial independent work without requiring the user to mention it. Say “don’t delegate”, “don’t use a worker”, or “do it yourself” to opt out for the current turn. The extension also blocks the tool during that opt-out turn. It does not silently run every prompt through another model; delegation remains a tool call so the parent can avoid unnecessary latency and context duplication.
 
-## Default workers
+## Built-in worker profiles
 
-These are defaults, not hard-coded requirements. Change them in configuration without editing the extension:
+The extension provides routing categories, but **you choose and configure the models**. There are no provider-specific model defaults in the package:
 
-| Profile | Default model | Intended work |
+| Profile | Intended work | Recommended model class |
 |---|---|---|
-| `fast` | `electronhub-devpass/gpt-oss-120b:dev` | exploration, tests, logs, bounded mechanical work |
-| `implement` | `electronhub-devpass/glm-5.2:dev` | substantive implementation and debugging |
-| `design` | `electronhub-devpass/kimi-k2.6:dev` | architecture, API, and UI trade-offs |
-| `vision` | `electronhub-devpass/gemma-4-31b-it:dev` | screenshots, diagrams, visual inspection |
-| `research` | `electronhub-devpass/qwen3.6-27b:dev` | papers, code archaeology, math, evidence |
-| `trivial` | `opencode-cli/opencode/deepseek-v4-flash-free` | tiny summaries and read-only tasks |
+| `fast` | exploration, tests, logs, bounded mechanical work | fast tool-using model |
+| `implement` | substantive implementation and debugging | strong coding/tool-use model |
+| `design` | architecture, API, and UI trade-offs | reasoning-oriented model |
+| `vision` | screenshots, diagrams, visual inspection | vision-capable model |
+| `research` | papers, code archaeology, math, evidence | long-context/reasoning model |
+| `trivial` | tiny summaries and read-only tasks | low-cost general model |
 
-ElectronHub DevPass models are treated as ordinary Pi models. If your account exposes different IDs, change the profile values.
+Configure each model using a normal Pi model reference in `agent-workflow.json`. Choose models based on tool calling, context length, reasoning, and vision support—not provider name.
 
 ## Automatic routing
 
@@ -111,7 +111,7 @@ Each run writes inspectable artifacts under:
 .pi/agent-workflow-runs/<job-id>/
 ```
 
-Artifacts include the task, route decision, visual attachments when present, worker result, bounded child JSONL/stderr captures, and failure diagnostics. Provider/authentication failures are preserved verbatim—for example, a missing ElectronHub key reports the failing keychain lookup instead of being mislabeled as an empty worker response.
+Artifacts include the task, route decision, visual attachments when present, worker result, bounded child JSONL/stderr captures, and failure diagnostics. Provider and authentication failures are preserved verbatim instead of being mislabeled as empty worker responses.
 
 ## Configuration
 
@@ -136,16 +136,48 @@ Example:
   "maxRetries": 1,
   "profiles": {
     "fast": {
-      "model": "electronhub-devpass/gpt-oss-120b:dev"
+      "model": "your-provider/fast-tool-model"
     },
     "implement": {
-      "model": "electronhub-devpass/glm-5.2:dev"
+      "model": "your-provider/coding-model",
+      "fallback": "your-provider/second-coding-model"
+    },
+    "vision": {
+      "model": "your-provider/vision-model"
     }
   }
 }
 ```
 
 Concurrency defaults to `1` to avoid edit races; raise it to `2` or more only when tasks are independent.
+
+### User-defined profiles
+
+Add specialized profiles without changing the extension. A profile’s `triggers` participate in automatic routing; the parent still calls only `delegate_work` and does not choose a model or role explicitly.
+
+```json
+{
+  "profiles": {
+    "proof": {
+      "label": "Proof worker",
+      "model": "your-provider/reasoning-model",
+      "thinking": "high",
+      "description": "Check mathematical proofs, derive results, and find counterexamples.",
+      "instructions": "State assumptions explicitly and distinguish proof from conjecture.",
+      "triggers": ["proof", "prove", "theorem", "counterexample"],
+      "priority": 10
+    },
+    "ml_experiment": {
+      "label": "ML experiment worker",
+      "model": "your-provider/long-context-model",
+      "description": "Plan reproducible ML experiments and analyze ablations and metrics.",
+      "triggers": ["ablation", "experiment", "reproducibility", "training run"]
+    }
+  }
+}
+```
+
+Custom profiles win when their trigger phrases match. Otherwise, the built-in deterministic router selects the closest category and records the reason in the job artifacts.
 
 ## Safety and reliability
 

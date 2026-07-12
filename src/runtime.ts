@@ -182,6 +182,14 @@ export async function runJob(options: RuntimeOptions, job: Job, images: ImageAtt
   job.startedAt = new Date().toISOString();
   jobs.set(job.id, job);
   render();
+  if (!job.decision.profile.model.trim()) {
+    job.status = "failed";
+    job.error = `No model configured for worker profile "${job.decision.kind}". Configure profiles.${job.decision.kind}.model in agent-workflow.json.`;
+    job.finishedAt = new Date().toISOString();
+    jobs.set(job.id, job);
+    render();
+    return job;
+  }
 
   const artifactDir = config.persistArtifacts
     ? join(ctx.cwd, ".pi", "agent-workflow-runs", job.id)
@@ -205,7 +213,8 @@ export async function runJob(options: RuntimeOptions, job: Job, images: ImageAtt
     : "";
   const peers = [...jobs.values()].filter((peer) => peer.id !== job.id && (peer.status === "running" || peer.status === "queued"));
   const peerInstruction = peers.length ? `\nPeer roster (message only these ids):\n${peers.map((peer) => `- ${peer.id}: ${peer.task.replace(/\s+/g, " ").slice(0, 100)}`).join("\n")}\n` : "\nPeer roster: none.\n";
-  const prompt = `You are a delegated ${job.decision.profile.label}.\n\n${job.decision.profile.description}\n\nRules:\n- Work only on the bounded task below.\n- Treat repository state and command output as evidence; do not invent files, tests, or results.\n- Make edits only when the task asks for implementation.\n- Run focused validation when practical.\n- End with a concise report containing: Result, Changes, Validation, Risks, Next step.\n- If blocked, say exactly what blocked you instead of pretending success.\n- You may report concise live progress with a line beginning \`WORKFLOW_UPDATE:\`.\n- If you need a decision from the parent, emit \`WORKFLOW_ASK: <question>\` and continue only with safe, reversible work.\n- To send a concise message to another running worker, emit \`WORKFLOW_TO: <worker-id>: <message>\` after checking the peer roster below.\n${imageInstruction}${peerInstruction}\nBounded task:\n${job.task}`;
+  const agentInstructions = job.decision.profile.instructions ? `\nAgent-specific instructions:\n${job.decision.profile.instructions}\n` : "";
+  const prompt = `You are a delegated ${job.decision.profile.label}.\n\n${job.decision.profile.description}${agentInstructions}\nRules:\n- Work only on the bounded task below.\n- Treat repository state and command output as evidence; do not invent files, tests, or results.\n- Make edits only when the task asks for implementation.\n- Run focused validation when practical.\n- End with a concise report containing: Result, Changes, Validation, Risks, Next step.\n- If blocked, say exactly what blocked you instead of pretending success.\n- You may report concise live progress with a line beginning \`WORKFLOW_UPDATE:\`.\n- If you need a decision from the parent, emit \`WORKFLOW_ASK: <question>\` and continue only with safe, reversible work.\n- To send a concise message to another running worker, emit \`WORKFLOW_TO: <worker-id>: <message>\` after checking the peer roster below.\n${imageInstruction}${peerInstruction}\nBounded task:\n${job.task}`;
 
   let lastError = "";
   const attempts = Math.max(1, config.maxRetries + 1);

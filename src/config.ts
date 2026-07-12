@@ -6,7 +6,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ThinkingLevel, WorkerKind, WorkerProfile, WorkflowConfig } from "./types.js";
 
 export const CONFIG_NAME = "agent-workflow.json";
-const kinds: WorkerKind[] = ["fast", "implement", "design", "vision", "research", "trivial"];
+export const BUILT_IN_KINDS: WorkerKind[] = ["fast", "implement", "design", "vision", "research", "trivial"];
 
 export const DEFAULT_CONFIG: WorkflowConfig = {
   enabled: true,
@@ -16,12 +16,12 @@ export const DEFAULT_CONFIG: WorkflowConfig = {
   maxRetries: 1,
   persistArtifacts: true,
   profiles: {
-    fast: { kind: "fast", label: "Fast worker", model: "electronhub-devpass/gpt-oss-120b:dev", thinking: "low", fallback: "opencode-cli/opencode/deepseek-v4-flash-free", description: "Fast repository exploration, tests, simple edits, and log collection." },
-    implement: { kind: "implement", label: "Implementation worker", model: "electronhub-devpass/glm-5.2:dev", thinking: "medium", fallback: "electronhub-devpass/gpt-oss-120b:dev", description: "Multi-file implementation, debugging, and substantive code changes." },
-    design: { kind: "design", label: "Design worker", model: "electronhub-devpass/kimi-k2.6:dev", thinking: "high", fallback: "electronhub-devpass/glm-5.2:dev", description: "Architecture, API, UI, and design trade-offs." },
-    vision: { kind: "vision", label: "Vision worker", model: "electronhub-devpass/gemma-4-31b-it:dev", thinking: "medium", fallback: "electronhub-devpass/qwen3.6-27b:dev", description: "Screenshots, diagrams, visual regressions, and image-grounded inspection." },
-    research: { kind: "research", label: "Research worker", model: "electronhub-devpass/qwen3.6-27b:dev", thinking: "medium", fallback: "electronhub-devpass/gpt-oss-120b:dev", description: "Literature, code archaeology, mathematical reasoning, and evidence gathering." },
-    trivial: { kind: "trivial", label: "Trivial worker", model: "opencode-cli/opencode/deepseek-v4-flash-free", thinking: "off", fallback: "electronhub-devpass/gpt-oss-120b:dev", description: "Small read-only questions, summaries, formatting, and mechanical work." },
+    fast: { kind: "fast", label: "Fast worker", model: "", thinking: "low", description: "Fast repository exploration, tests, simple edits, and log collection." },
+    implement: { kind: "implement", label: "Implementation worker", model: "", thinking: "medium", description: "Multi-file implementation, debugging, and substantive code changes." },
+    design: { kind: "design", label: "Design worker", model: "", thinking: "high", description: "Architecture, API, UI, and design trade-offs." },
+    vision: { kind: "vision", label: "Vision worker", model: "", thinking: "medium", description: "Screenshots, diagrams, visual regressions, and image-grounded inspection." },
+    research: { kind: "research", label: "Research worker", model: "", thinking: "medium", description: "Literature, code archaeology, mathematical reasoning, and evidence gathering." },
+    trivial: { kind: "trivial", label: "Trivial worker", model: "", thinking: "off", description: "Small read-only questions, summaries, formatting, and mechanical work." },
   },
 };
 
@@ -30,18 +30,27 @@ function mergeConfig(base: WorkflowConfig, value: unknown): WorkflowConfig {
   const raw = value as Record<string, unknown>;
   const profiles = { ...base.profiles };
   if (raw.profiles && typeof raw.profiles === "object") {
-    for (const kind of kinds) {
-      const candidate = (raw.profiles as Record<string, unknown>)[kind];
-      if (!candidate || typeof candidate !== "object") continue;
+    for (const [kind, candidate] of Object.entries(raw.profiles as Record<string, unknown>)) {
+      if (!candidate || typeof candidate !== "object" || !/^[a-z][a-z0-9_-]{0,31}$/i.test(kind)) continue;
       const item = candidate as Record<string, unknown>;
-      const current = profiles[kind];
+      const current = profiles[kind] ?? {
+        kind,
+        label: kind,
+        model: "",
+        thinking: "medium" as ThinkingLevel,
+        description: `User-defined ${kind} worker.`,
+      };
       profiles[kind] = {
         ...current,
-        ...(typeof item.model === "string" && item.model ? { model: item.model } : {}),
-        ...(typeof item.fallback === "string" && item.fallback ? { fallback: item.fallback } : {}),
+        kind,
+        ...(typeof item.model === "string" ? { model: item.model } : {}),
+        ...(typeof item.fallback === "string" ? { fallback: item.fallback } : {}),
         ...(typeof item.thinking === "string" && ["off", "minimal", "low", "medium", "high", "xhigh"].includes(item.thinking) ? { thinking: item.thinking as ThinkingLevel } : {}),
         ...(typeof item.label === "string" && item.label ? { label: item.label } : {}),
         ...(typeof item.description === "string" && item.description ? { description: item.description } : {}),
+        ...(typeof item.instructions === "string" && item.instructions ? { instructions: item.instructions } : {}),
+        ...(Array.isArray(item.triggers) ? { triggers: item.triggers.filter((trigger): trigger is string => typeof trigger === "string" && trigger.trim().length > 0).slice(0, 32) } : {}),
+        ...(typeof item.priority === "number" && Number.isFinite(item.priority) ? { priority: item.priority } : {}),
       };
     }
   }
@@ -71,8 +80,10 @@ export async function loadConfig(ctx: Pick<ExtensionContext, "cwd">): Promise<Wo
 }
 
 export function profileSummary(config: WorkflowConfig): string[] {
-  return kinds.map((kind) => {
+  return Object.keys(config.profiles).map((kind) => {
     const p = config.profiles[kind];
-    return `${kind.padEnd(9)} ${p.model} (${p.thinking}) — ${p.description}`;
+    const model = p.model || "<not configured>";
+    const triggers = p.triggers?.length ? ` [${p.triggers.join(", ")}]` : "";
+    return `${kind.padEnd(12)} ${model} (${p.thinking}) — ${p.description}${triggers}`;
   });
 }

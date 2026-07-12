@@ -9,10 +9,18 @@ test("routes attached images to vision regardless of wording", () => {
   assert.match(result.reason, /visual/);
 });
 
-test("routes implementation to GLM profile", () => {
-  const result = routeTask({ task: "implement the cache invalidation feature and run tests" }, DEFAULT_CONFIG);
+test("routes implementation to the configured implementation profile", () => {
+  const config = { ...DEFAULT_CONFIG, profiles: { ...DEFAULT_CONFIG.profiles, implement: { ...DEFAULT_CONFIG.profiles.implement, model: "test-provider/coding-model" } } };
+  const result = routeTask({ task: "implement the cache invalidation feature and run tests" }, config);
   assert.equal(result.kind, "implement");
-  assert.match(result.profile.model, /glm-5\.2/);
+  assert.equal(result.profile.model, "test-provider/coding-model");
+});
+
+test("routes matching user-defined profiles before built-ins", () => {
+  const config = { ...DEFAULT_CONFIG, profiles: { ...DEFAULT_CONFIG.profiles, proof: { kind: "proof", label: "Proof worker", model: "test-provider/reasoning", thinking: "high" as const, description: "Proof checking", triggers: ["counterexample"], priority: 10 } } };
+  const result = routeTask({ task: "find a counterexample to this theorem" }, config);
+  assert.equal(result.kind, "proof");
+  assert.match(result.reason, /user profile/);
 });
 
 test("routes research and design separately", () => {

@@ -374,11 +374,17 @@ export default function piAgentWorkflow(pi: ExtensionAPI) {
       }
       if (command === "doctor") {
         const live = args.split(/\s+/).includes("live");
-        const models = [...new Set(Object.values(config.profiles).flatMap((profile) => [profile.model, ...(profile.fallback ? [profile.fallback] : [])]))];
+        const unconfigured = Object.entries(config.profiles).filter(([, profile]) => !profile.model.trim()).map(([kind]) => kind);
+        const models = [...new Set(Object.values(config.profiles).flatMap((profile) => [profile.model, ...(profile.fallback ? [profile.fallback] : [])]).filter(Boolean))];
         if (!live) {
           const listed = await pi.exec("pi", ["--list-models"], { cwd: ctx.cwd, timeout: 20_000 });
           const missing = models.filter((model) => !listed.stdout.includes(model.split("/").at(-1) ?? model));
-          ctx.ui.notify(missing.length ? `Model registry check: missing\n${missing.join("\n")}\n\nUse /workflow doctor live to test authentication.` : `Model registry check: all ${models.length} configured model refs are present.\n\nUse /workflow doctor live to test authentication.`, missing.length ? "warning" : "info");
+          const messages = [
+            ...(unconfigured.length ? [`Unconfigured profiles: ${unconfigured.join(", ")}`] : []),
+            ...(missing.length ? [`Model registry check: missing\n${missing.join("\n")}`] : [`Model registry check: all ${models.length} configured model refs are present.`]),
+            "Use /workflow doctor live to test authentication.",
+          ];
+          ctx.ui.notify(messages.join("\n\n"), missing.length || unconfigured.length ? "warning" : "info");
           return;
         }
         const lines: string[] = [];

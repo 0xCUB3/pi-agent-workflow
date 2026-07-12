@@ -133,7 +133,7 @@ Example:
 }
 ```
 
-Concurrency defaults to `2`; use `1` for a repository where workers may edit overlapping files.
+Concurrency defaults to `1` to avoid edit races; raise it to `2` or more only when tasks are independent.
 
 ## Safety and reliability
 

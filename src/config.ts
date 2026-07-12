@@ -10,7 +10,7 @@ const kinds: WorkerKind[] = ["fast", "implement", "design", "vision", "research"
 
 export const DEFAULT_CONFIG: WorkflowConfig = {
   enabled: true,
-  maxConcurrent: 2,
+  maxConcurrent: 1,
   timeoutMs: 30 * 60_000,
   maxOutputChars: 24_000,
   maxRetries: 1,

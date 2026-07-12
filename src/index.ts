@@ -84,6 +84,7 @@ export default function piAgentWorkflow(pi: ExtensionAPI) {
       jobs.set(job.id, job);
       const controller = new AbortController();
       const parentSignal = signal ?? new AbortController().signal;
+      if (parentSignal.aborted) controller.abort();
       controllers.set(job.id, controller);
       const abortOnParent = () => controller.abort();
       parentSignal.addEventListener("abort", abortOnParent, { once: true });

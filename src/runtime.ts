@@ -86,7 +86,7 @@ export function workerEvidenceError(task: string, toolsUsed: string[] | undefine
   const explicitlyReadOnly = /\b(?:read[- ]only|without editing|no changes?)\b/.test(text) || intentText !== text && !/\b(?:implement|build|add|change|modify|edit|update|fix|refactor|write|create|remove|delete)\b/.test(intentText);
   const asksForMutation = !explicitlyReadOnly && /\b(?:implement|build|add|change|modify|edit|update|fix|refactor|write|create|remove|delete)\b/.test(intentText);
   const asksForRepositoryEvidence = /\b(?:inspect|audit|search|find|check|test|validate|run|repository|repo|file|source|code|exact lines?)\b/.test(text);
-  if (asksForMutation && !["edit", "write", "bash"].some((tool) => tools.has(tool))) return "worker returned a mutation report without using an edit, write, or bash tool";
+  if (asksForMutation && !["edit", "write"].some((tool) => tools.has(tool))) return "worker returned a mutation report without using an edit or write tool";
   if (/\b(?:cat|run|execute|command|tests?)\b/.test(text) && !tools.has("bash")) return "worker did not perform the requested command or test validation with bash";
   if (asksForRepositoryEvidence && tools.size === 0) return "worker returned a repository report without using any repository tool";
   return undefined;

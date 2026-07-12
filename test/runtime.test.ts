@@ -31,7 +31,7 @@ test("parses bounded worker message signals", () => {
 });
 
 test("requires actual tool evidence for requested repository work", () => {
-  assert.match(workerEvidenceError("change value.txt from 1 to 2; do not modify any other files", ["read"]) ?? "", /mutation report/);
+  assert.match(workerEvidenceError("change value.txt from 1 to 2; do not modify any other files", ["read", "bash"]) ?? "", /edit or write tool/);
   assert.equal(workerEvidenceError("change value.txt from 1 to 2; do not modify any other files", ["read", "edit"]), undefined);
   assert.match(workerEvidenceError("change value.txt and run cat value.txt to validate", ["write"] ) ?? "", /command or test validation/);
   assert.equal(workerEvidenceError("change value.txt and run cat value.txt to validate", ["write", "bash"]), undefined);

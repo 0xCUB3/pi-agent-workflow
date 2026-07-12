@@ -127,6 +127,8 @@ export default function piAgentWorkflow(pi: ExtensionAPI) {
   let fleetSelected = "main";
   let fleetViewerClose: (() => void) | undefined;
   let fleetViewerTui: any;
+  let activeCtx: ExtensionContext | undefined;
+  const cleanupTimers = new Set<ReturnType<typeof setTimeout>>();
 
   const fleetJobs = () => [...jobs.values()].filter((job) => job.status === "running" || job.status === "queued" || (["succeeded", "failed", "cancelled"].includes(job.status) && isRecentJob(job))).sort((a, b) => (a.startedAt ?? "").localeCompare(b.startedAt ?? ""));
 
@@ -216,10 +218,26 @@ export default function piAgentWorkflow(pi: ExtensionAPI) {
   };
 
   pi.on("session_start", async (_event, ctx) => {
+    activeCtx = ctx;
     config = await loadConfig(ctx);
     queue = createQueue(config.maxConcurrent);
     latestImages = [];
     refresh(ctx);
+  });
+
+  pi.on("session_shutdown", async () => {
+    activeCtx = undefined;
+    if (widgetTimer) { clearInterval(widgetTimer); widgetTimer = undefined; }
+    for (const timer of cleanupTimers) clearTimeout(timer);
+    cleanupTimers.clear();
+    fleetInputUnsub?.();
+    fleetInputUnsub = undefined;
+    widgetRegistered = false;
+    widgetTui = undefined;
+    fleetRegistered = false;
+    fleetTui = undefined;
+    fleetViewerTui = undefined;
+    fleetViewerClose = undefined;
   });
 
   pi.on("input", async (event) => {
@@ -260,15 +278,19 @@ export default function piAgentWorkflow(pi: ExtensionAPI) {
       refresh(ctx);
       try {
         const run = queue ?? createQueue(config.maxConcurrent);
-        const result = await run(() => runJob({ pi, ctx, config: config!, jobs, render: () => refresh(ctx) }, job, latestImages, controller.signal));
+        const result = await run(() => runJob({ pi, ctx, config: config!, jobs, render: () => { if (activeCtx) refresh(activeCtx); } }, job, latestImages, controller.signal));
         const heading = `${result.status === "succeeded" ? "Worker complete" : "Worker did not complete"} · ${result.id} · ${routeLabel(result.decision.kind)} · ${result.decision.profile.model}`;
         const body = result.status === "succeeded" ? result.output ?? "Worker returned no report." : `Error: ${result.error ?? "unknown worker failure"}`;
         return { content: [{ type: "text", text: `${heading}\nRouting: ${result.decision.reason}\nAttempts: ${result.attempts}\n\n${body}` }], details: { job: result } };
       } finally {
         parentSignal.removeEventListener("abort", abortOnParent);
         controllers.delete(job.id);
-        refresh(ctx);
-        const cleanup = setTimeout(() => refresh(ctx), 8_100);
+        if (activeCtx) refresh(activeCtx);
+        const cleanup = setTimeout(() => {
+          cleanupTimers.delete(cleanup);
+          if (activeCtx) refresh(activeCtx);
+        }, 8_100);
+        cleanupTimers.add(cleanup);
         cleanup.unref?.();
       }
     },

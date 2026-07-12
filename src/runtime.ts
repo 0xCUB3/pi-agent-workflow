@@ -1,6 +1,8 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
+
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ChildResult, Job, RouteDecision, WorkflowConfig } from "./types.js";
 
@@ -53,12 +55,13 @@ async function runOnce(ctx: ExtensionContext, decision: RouteDecision, prompt: s
     let stdout = "";
     let stderr = "";
     let buffer = "";
+    const appendBounded = (current: string, value: string, max: number) => (current + value).slice(-max);
     let timedOut = false;
     let settled = false;
     const finish = (result: ChildResult) => { if (!settled) { settled = true; resolve(result); } };
     const handleLine = (line: string) => {
       if (!line.trim()) return;
-      stdout += `${line}\n`;
+      stdout = appendBounded(stdout, `${line}\n`, 4_000_000);
       try {
         const event = JSON.parse(line) as { type?: string; toolName?: string; message?: { role?: string; content?: unknown } };
         if (event.type === "tool_execution_start") onEvent(`tool:${event.toolName || "unknown"}`);
@@ -68,12 +71,12 @@ async function runOnce(ctx: ExtensionContext, decision: RouteDecision, prompt: s
       } catch { /* diagnostics are retained in stdout */ }
     };
     child.stdout.on("data", (chunk: Buffer | string) => {
-      buffer += chunk.toString();
+      buffer = appendBounded(buffer, chunk.toString(), 1_000_000);
       const lines = buffer.split(/\r?\n/);
       buffer = lines.pop() || "";
       lines.forEach(handleLine);
     });
-    child.stderr.on("data", (chunk: Buffer | string) => { stderr += chunk.toString(); });
+    child.stderr.on("data", (chunk: Buffer | string) => { stderr = appendBounded(stderr, chunk.toString(), 200_000); });
     const abort = () => child.kill("SIGTERM");
     signal.addEventListener("abort", abort, { once: true });
     const timer = setTimeout(() => { timedOut = true; child.kill("SIGTERM"); }, timeoutMs);
@@ -99,10 +102,14 @@ export async function runJob(options: RuntimeOptions, job: Job, images: ImageAtt
   jobs.set(job.id, job);
   render();
 
-  const artifactDir = join(ctx.cwd, ".pi", "agent-workflow-runs", job.id);
-  if (config.persistArtifacts) {
+  const artifactDir = config.persistArtifacts
+    ? join(ctx.cwd, ".pi", "agent-workflow-runs", job.id)
+    : images.length > 0
+      ? await mkdtemp(join(tmpdir(), "pi-agent-workflow-"))
+      : undefined;
+  if (artifactDir) {
     await mkdir(artifactDir, { recursive: true });
-    job.artifactDir = artifactDir;
+    if (config.persistArtifacts) job.artifactDir = artifactDir;
     await writeFile(join(artifactDir, "task.md"), job.task, "utf8");
     await writeFile(join(artifactDir, "route.json"), JSON.stringify(job.decision, null, 2), "utf8");
     for (let i = 0; i < images.length; i++) {

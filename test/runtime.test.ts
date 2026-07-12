@@ -30,4 +30,5 @@ test("requires actual tool evidence for requested repository work", () => {
   assert.match(workerEvidenceError("change value.txt and run cat value.txt to validate", ["write"] ) ?? "", /command or test validation/);
   assert.equal(workerEvidenceError("change value.txt and run cat value.txt to validate", ["write", "bash"]), undefined);
   assert.match(workerEvidenceError("inspect the repository and report findings", []) ?? "", /repository tool/);
+  assert.equal(workerEvidenceError("read package.json and report its version. Do not edit any files.", ["read"]), undefined);
 });

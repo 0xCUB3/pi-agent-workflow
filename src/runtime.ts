@@ -66,8 +66,10 @@ function reportIsUnsuccessful(output: string): boolean {
 export function workerEvidenceError(task: string, toolsUsed: string[] | undefined): string | undefined {
   const text = task.toLowerCase();
   const tools = new Set(toolsUsed ?? []);
-  const explicitlyReadOnly = /\b(?:read[- ]only|without editing|no changes?)\b/.test(text) || /\bdo not (?:modify|edit|write) (?:anything|the repository|files)\b/.test(text);
-  const asksForMutation = !explicitlyReadOnly && /\b(?:implement|build|add|change|modify|edit|update|fix|refactor|write|create|remove|delete)\b/.test(text);
+  const negativeMutation = /\bdo not (?:modify|edit|write) (?:(?:any\s+other)|any|the|this|other)?\s*(?:files?|anything|the repository)\b/g;
+  const intentText = text.replace(negativeMutation, "");
+  const explicitlyReadOnly = /\b(?:read[- ]only|without editing|no changes?)\b/.test(text) || intentText !== text && !/\b(?:implement|build|add|change|modify|edit|update|fix|refactor|write|create|remove|delete)\b/.test(intentText);
+  const asksForMutation = !explicitlyReadOnly && /\b(?:implement|build|add|change|modify|edit|update|fix|refactor|write|create|remove|delete)\b/.test(intentText);
   const asksForRepositoryEvidence = /\b(?:inspect|audit|search|find|check|test|validate|run|repository|repo|file|source|code|exact lines?)\b/.test(text);
   if (asksForMutation && !["edit", "write", "bash"].some((tool) => tools.has(tool))) return "worker returned a mutation report without using an edit, write, or bash tool";
   if (/\b(?:cat|run|execute|command|tests?)\b/.test(text) && !tools.has("bash")) return "worker did not perform the requested command or test validation with bash";

@@ -21,7 +21,10 @@ function formatJob(job: Job): string {
   const icon = job.status === "succeeded" ? "✓" : job.status === "failed" ? "✗" : job.status === "cancelled" ? "■" : job.status === "running" ? "●" : "○";
   const duration = job.startedAt && job.finishedAt ? ` ${Math.max(0, Date.parse(job.finishedAt) - Date.parse(job.startedAt)) / 1000}s` : "";
   const activity = job.currentTool ? ` · ${job.currentTool}` : job.lastEvent ? ` · ${job.lastEvent}` : "";
-  return `${icon} ${job.id} ${routeLabel(job.decision.kind).toLowerCase()} · ${job.decision.profile.model}${activity}${duration}`;
+  const rawTask = job.task.replace(/\s+/g, " ").trim();
+  const task = rawTask.slice(0, 52);
+  const model = job.decision.profile.model.split("/").at(-1) || job.decision.profile.model;
+  return `${icon} ${job.id} ${routeLabel(job.decision.kind).toLowerCase()} · ${task}${task.length < rawTask.length ? "…" : ""} · ${model}${activity}${duration}`;
 }
 
 function widgetLines(jobs: Map<string, Job>): string[] {

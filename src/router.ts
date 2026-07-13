@@ -23,20 +23,21 @@ export function routeTask(input: RouteInput, config: WorkflowConfig): RouteDecis
   }
   let kind: WorkerKind;
   let reason: string;
+  const explicitlyReadOnly = word(text, /\bread[- ]only\b|\bdo not (?:modify|edit|change|write)\b|\bdon't (?:modify|edit|change|write)\b|\bno (?:file )?changes\b|\bwithout (?:modifying|editing|changing|writing)\b/);
 
-  if (input.hasImages || (input.imageCount ?? 0) > 0 || word(text, /screenshot|image|diagram|photo|visual regression|pixel|layout from|look at this/)) {
+  if (input.hasImages || (input.imageCount ?? 0) > 0 || word(text, /\b(?:screenshot|image|diagram|photo|visual regression|pixel|layout from|look at this)\b/)) {
     kind = "vision";
     reason = "visual input or visual inspection requested";
-  } else if (word(text, /design|architect|architecture|trade-?off|api shape|schema design|ui|ux|component design|system design/)) {
+  } else if (word(text, /\b(?:design|architect|architecture|trade-?offs?|api shape|schema design|ui|ux|component design|system design)\b/)) {
     kind = "design";
     reason = "architecture, API, or UI design language detected";
-  } else if (word(text, /paper|arxiv|literature|citation|prove|theorem|derive|mathematical|research|survey|compare sources|code archaeology/)) {
+  } else if (word(text, /\b(?:papers?|arxiv|literature|citations?|prove|theorem|derive|mathematical|research|survey|compare sources|code archaeology)\b/)) {
     kind = "research";
     reason = "research or mathematical reasoning language detected";
-  } else if (word(text, /inspect|search|find|check|identify|determine|report|whether|only .*update|no .*change/) && !word(text, /\b(implement|build|add|edit|modify|refactor|debug|fix|feature|migration|endpoint|hook|class|function|write code)\b/)) {
+  } else if (explicitlyReadOnly || (word(text, /inspect|search|find|check|identify|determine|report|whether|only .*update|no .*change/) && !word(text, /\b(implement|build|add|edit|modify|refactor|debug|fix|feature|migration|endpoint|hook|class|function|write code)\b/))) {
     kind = "fast";
     reason = "read-only repository inspection or evidence gathering detected";
-  } else if (word(text, /implement|build|add|update|change|modify|refactor|debug|fix|feature|migration|endpoint|hook|class|function|multi-file|write code/)) {
+  } else if (word(text, /\b(?:implement|build|add|update|change|modify|refactor|debug|fix|feature|migration|endpoint|hook|class|function|multi-file|write code)\b/)) {
     kind = "implement";
     reason = "substantive implementation language detected";
   } else if (word(text, /grep|find|search|inspect|list files|summarize|explain this file|run tests|check status|format|rename|mechanical|read-only/)) {

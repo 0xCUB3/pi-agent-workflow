@@ -6,42 +6,74 @@ export type WorkerProfile = {
   label: string;
   model: string;
   thinking: ThinkingLevel;
-  fallback?: string;
+  fallback?: string | string[];
   description: string;
   instructions?: string;
   triggers?: string[];
   priority?: number;
+  web?: boolean;
+  tools?: string[];
+  spawns?: string[] | "*";
+  blocking?: boolean;
+  autoloadSkills?: string[];
+  skillPaths?: string[];
+  output?: unknown;
+  source?: "builtin" | "user" | "project";
+  filePath?: string;
+  extensions?: string[];
 };
 
 export type WorkflowConfig = {
   enabled: boolean;
   maxConcurrent: number;
+  maxConcurrentPerProvider: number;
   timeoutMs: number;
   maxOutputChars: number;
+  maxOutputBytes: number;
+  maxOutputLines: number;
   maxRetries: number;
   persistArtifacts: boolean;
+  persistState: boolean;
+  recoverInterrupted: boolean;
+  isolation: boolean;
+  agentIdleTtlMs: number;
+  softRequestBudget: number;
+  maxDepth: number;
+  maxChildrenPerWorker: number;
+  maxTotalWorkers: number;
+  maxNestedConcurrent: number;
   profiles: Record<string, WorkerProfile>;
 };
 
-export type RouteInput = {
-  task: string;
-  hasImages?: boolean;
-  imageCount?: number;
-};
+export type RouteInput = { task: string; hasImages?: boolean; imageCount?: number };
+export type RouteDecision = { kind: WorkerKind; reason: string; profile: WorkerProfile };
+export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled" | "interrupted";
+export type WorkerLifecycle = "starting" | "running" | "idle" | "parked" | "aborted";
+export type WorkerControl = { steer(message: string): boolean; followUp(message: string): boolean };
 
-export type RouteDecision = {
-  kind: WorkerKind;
-  reason: string;
-  profile: WorkerProfile;
+export type UsageTotals = {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  totalTokens: number;
 };
-
-export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 
 export type Job = {
   id: string;
+  name?: string;
+  cwd: string;
   task: string;
+  sharedContext?: string;
   decision: RouteDecision;
   status: JobStatus;
+  async?: boolean;
+  isolated?: boolean;
+  parentId?: string;
+  rootId?: string;
+  depth?: number;
+  recoveryCount?: number;
+  createdAt: string;
   startedAt?: string;
   finishedAt?: string;
   attempts: number;
@@ -49,13 +81,32 @@ export type Job = {
   error?: string;
   exitCode?: number;
   artifactDir?: string;
+  worktreeDir?: string;
   currentTool?: string;
+  currentToolArgs?: string;
   lastEvent?: string;
+  lifecycle?: WorkerLifecycle;
+  sessionFile?: string;
+  ipcDir?: string;
   toolUses?: number;
   toolsUsed?: string[];
   lastMessage?: string;
+  livePreview?: string;
   messageCount?: number;
+  ircAddress?: string;
+  ircFrom?: string;
+  ircReplyAllowed?: boolean;
+  childCount?: number;
+  durationMs?: number;
+  usage?: UsageTotals;
+  requests?: number;
+  cost?: number;
+  contextTokens?: number;
+  contextWindow?: number;
+  outputTruncated?: boolean;
 };
+
+export type PersistedWorkflowState = { version: 1; updatedAt: string; jobs: Job[] };
 
 export type ChildResult = {
   ok: boolean;
@@ -64,7 +115,14 @@ export type ChildResult = {
   exitCode: number;
   timedOut: boolean;
   durationMs: number;
-  usage?: { input?: number; output?: number; total?: number };
+  usage: UsageTotals;
+  requests: number;
+  sessionFile?: string;
+  cost?: number;
+  contextTokens?: number;
+  contextWindow?: number;
+  yielded?: boolean;
+  yieldStatus?: "completed" | "blocked";
   rawJsonl?: string;
   stderr?: string;
 };

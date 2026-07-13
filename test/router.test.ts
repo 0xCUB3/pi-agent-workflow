@@ -31,5 +31,6 @@ test("routes research and design separately", () => {
 test("routes exploration to fast worker and ambiguous work to trivial", () => {
   assert.equal(routeTask({ task: "inspect the repository and run tests" }, DEFAULT_CONFIG).kind, "fast");
   assert.equal(routeTask({ task: "check whether the app auto-updates, but only filter scripts should update" }, DEFAULT_CONFIG).kind, "fast");
+  assert.equal(routeTask({ task: "inspect package.json; read-only, do not modify files" }, DEFAULT_CONFIG).kind, "fast");
   assert.equal(routeTask({ task: "what is this?" }, DEFAULT_CONFIG).kind, "trivial");
 });

@@ -403,7 +403,7 @@ export async function runJob(options: RuntimeOptions, job: Job, images: ImageAtt
   let isolation: IsolationContext | undefined;
   let workerCwd = options.cwd;
   if (job.isolated) {
-    try { isolation = await prepareIsolation(pi, options.cwd, job.id); workerCwd = isolation.worktreeDir; job.worktreeDir = workerCwd; onChange(job); }
+    try { isolation = await prepareIsolation(pi, options.cwd, job.id, config.isolationBackend); workerCwd = isolation.worktreeDir; job.worktreeDir = workerCwd; job.isolationBackend = isolation.backend; onChange(job); }
     catch (error) { job.status = "failed"; job.error = error instanceof Error ? error.message : String(error); job.finishedAt = new Date().toISOString(); onChange(job); return job; }
   }
 

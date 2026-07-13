@@ -148,6 +148,7 @@ Example:
   "persistState": true,
   "recoverInterrupted": true,
   "isolation": true,
+  "isolationBackend": "auto",
   "agentIdleTtlMs": 420000,
   "softRequestBudget": 200,
   "maxDepth": 3,
@@ -256,11 +257,12 @@ The scheduler lifecycle and worktree-isolation design are adapted from the MIT-l
 
 - Routing is deterministic keyword policy, not a learned benchmark-validated classifier.
 - The parent still decides whether delegation is worthwhile.
+- The live widget shows worker trees, pending inbox cards, delivery states, tool/token/cost telemetry, and the active isolation backend.
 - Worker quality depends on the provider and model snapshot.
 - Recursive spawning and worker IRC use a bounded local IPC bridge plus a durable in-process mailbox. Direct messages wake idle workers and revive parked sessions; broadcasts target live peers. Parent cancellation propagates through the entire child tree, including children active during soft-budget aborts.
 - Resource-style addresses are available through `workflow_resource`: `agent://<id>/result`, `agent://<id>/history`, `agent://<id>/status`, and `history://<id>`.
 - Profiles listing MCP/LSP tools inherit the parent tool extension path when Pi exposes it, or can declare explicit `extensions` paths. Pi has no generic API for invoking arbitrary parent tools, so calls execute inside the worker rather than being relayed through the parent.
-- Isolation snapshots dirty tracked and untracked files, merges with content-hash conflict checks, and clones nested Git repositories into the worker worktree. Clean trees still use checked Git worktrees.
+- Isolation snapshots dirty tracked and untracked files, merges with content-hash conflict checks, and clones nested Git repositories into the worker worktree. `isolationBackend: "auto"` selects APFS clone, reflink, Btrfs, ZFS, or overlay backends when available and safely falls back to a checked Git worktree.
 - A worker may edit files; inspect the diff and run project tests before accepting its report.
 
 ## Development

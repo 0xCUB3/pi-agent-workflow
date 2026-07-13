@@ -1,5 +1,6 @@
 export type WorkerKind = string;
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+export type IsolationBackend = "auto" | "git-worktree" | "apfs-clone" | "reflink" | "btrfs" | "zfs" | "overlay";
 
 export type WorkerProfile = {
   kind: WorkerKind;
@@ -36,6 +37,7 @@ export type WorkflowConfig = {
   persistState: boolean;
   recoverInterrupted: boolean;
   isolation: boolean;
+  isolationBackend: IsolationBackend;
   agentIdleTtlMs: number;
   softRequestBudget: number;
   maxDepth: number;
@@ -104,6 +106,11 @@ export type Job = {
   contextTokens?: number;
   contextWindow?: number;
   outputTruncated?: boolean;
+  isolationBackend?: Exclude<IsolationBackend, "auto">;
+  ircUnread?: number;
+  lastDelivery?: string;
+  lastDeliveryAt?: string;
+  deliveryCount?: number;
 };
 
 export type PersistedWorkflowState = { version: 1; updatedAt: string; jobs: Job[] };

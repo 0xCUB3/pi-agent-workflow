@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { dirname, join, relative } from "node:path";
 import { tmpdir } from "node:os";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { IsolationBackend } from "./types.js";
 
 export type IsolationContext = {
   mainCwd: string;
@@ -14,6 +15,8 @@ export type IsolationContext = {
   baselinePatch?: string;
   baselineUntracked: Record<string, string>;
   nested: NestedRepository[];
+  backend: Exclude<IsolationBackend, "auto">;
+  backendResource?: string;
 };
 
 type NestedRepository = {
@@ -64,8 +67,86 @@ async function copyPath(sourceRoot: string, destinationRoot: string, path: strin
   await cp(source, destination, { recursive: true, force: true });
 }
 async function removePath(root: string, path: string): Promise<void> { await rm(join(root, path), { recursive: true, force: true }); }
+type ConcreteBackend = Exclude<IsolationBackend, "auto">;
+async function command(pi: Exec, name: string, args: string[], cwd?: string, timeout = 60_000) {
+  return pi.exec(name, args, { cwd, timeout });
+}
+async function filesystemType(pi: Exec, cwd: string): Promise<string> {
+  const result = await command(pi, "findmnt", ["-T", cwd, "-no", "FSTYPE"]);
+  return result.code === 0 ? result.stdout.trim().split(/\s+/)[0] ?? "" : "";
+}
+async function hasReflinkCp(pi: Exec): Promise<boolean> {
+  const result = await command(pi, "cp", ["--help"]);
+  return result.stdout.includes("--reflink") || result.stderr.includes("--reflink");
+}
+async function hasZfsDataset(pi: Exec, cwd: string): Promise<string | undefined> {
+  const result = await command(pi, "zfs", ["list", "-H", "-o", "name,mountpoint"]);
+  if (result.code !== 0) return undefined;
+  const rows = result.stdout.split("\n").map((line) => line.trim().split(/\s+/)).filter((row) => row.length >= 2);
+  return rows.sort((a, b) => b[1].length - a[1].length).find((row) => row[1] === cwd)?.[0];
+}
+export async function detectIsolationBackend(pi: Exec, cwd: string, requested: IsolationBackend = "auto"): Promise<ConcreteBackend> {
+  if (requested === "git-worktree") return requested;
+  const os = (await command(pi, "uname", ["-s"])).stdout.trim().toLowerCase();
+  const fs = await filesystemType(pi, cwd);
+  const apfs = os === "darwin";
+  const reflink = await hasReflinkCp(pi);
+  const btrfs = fs === "btrfs" && (await command(pi, "btrfs", ["--version"])).code === 0;
+  const zfs = Boolean(fs === "zfs" && await hasZfsDataset(pi, cwd));
+  const overlay = os === "linux" && fs === "overlay";
+  const available: Record<ConcreteBackend, boolean> = {
+    "git-worktree": true, "apfs-clone": apfs, reflink, btrfs, zfs, overlay,
+  };
+  if (requested !== "auto") return available[requested] ? requested : "git-worktree";
+  if (apfs) return "apfs-clone";
+  if (btrfs) return "btrfs";
+  if (zfs) return "zfs";
+  if (reflink) return "reflink";
+  if (overlay) return "overlay";
+  return "git-worktree";
+}
+async function nativeCopy(pi: Exec, source: string, destination: string, backend: ConcreteBackend): Promise<string | undefined> {
+  if (backend === "apfs-clone" || backend === "reflink") {
+    const gitFile = await readFile(join(source, ".git"), "utf8").catch(() => undefined);
+    if (gitFile !== undefined) throw new Error("native copy requires a repository with an independent .git directory");
+    await mkdir(destination, { recursive: true });
+    const sourceContents = `${source}${source.endsWith("/") ? "" : "/"}.`;
+    const args = backend === "apfs-clone" ? ["-c", "-R", sourceContents, destination] : ["-a", "--reflink=always", sourceContents, destination];
+    const result = await command(pi, "cp", args, dirname(source), 120_000);
+    if (result.code !== 0) throw new Error(result.stderr.trim() || `cp ${backend} failed`);
+    // A copied repository must not retain the parent's active worktree
+    // administration or transient lock files.
+    await rm(join(destination, ".git", "worktrees"), { recursive: true, force: true });
+    await rm(join(destination, ".git", "index.lock"), { force: true });
+    return undefined;
+  }
+  if (backend === "btrfs") {
+    const result = await command(pi, "btrfs", ["subvolume", "snapshot", source, destination], undefined, 120_000);
+    if (result.code !== 0) throw new Error(result.stderr.trim() || "btrfs snapshot failed");
+    return undefined;
+  }
+  if (backend === "overlay") {
+    const root = dirname(destination), upper = join(root, "overlay-upper"), work = join(root, "overlay-work");
+    await mkdir(upper, { recursive: true }); await mkdir(work, { recursive: true }); await mkdir(destination, { recursive: true });
+    const result = await command(pi, "mount", ["-t", "overlay", "overlay", "-o", `lowerdir=${source},upperdir=${upper},workdir=${work}`, destination], undefined, 120_000);
+    if (result.code !== 0) throw new Error(result.stderr.trim() || "overlay mount failed");
+    return destination;
+  }
+  if (backend === "zfs") {
+    const dataset = await hasZfsDataset(pi, source);
+    if (!dataset) throw new Error("ZFS dataset for repository was not found");
+    const snapshot = `${dataset}@pi-worker-${Date.now()}`;
+    const clone = `${dataset}/pi-worker-${Date.now()}`;
+    let result = await command(pi, "zfs", ["snapshot", snapshot], undefined, 120_000);
+    if (result.code !== 0) throw new Error(result.stderr.trim() || "zfs snapshot failed");
+    result = await command(pi, "zfs", ["clone", "-o", `mountpoint=${destination}`, snapshot, clone], undefined, 120_000);
+    if (result.code !== 0) { await command(pi, "zfs", ["destroy", snapshot]); throw new Error(result.stderr.trim() || "zfs clone failed"); }
+    return `${clone}|${snapshot}`;
+  }
+  throw new Error(`Unsupported native isolation backend ${backend}`);
+}
 
-export async function prepareIsolation(pi: Exec, cwd: string, jobId: string): Promise<IsolationContext> {
+export async function prepareIsolation(pi: Exec, cwd: string, jobId: string, requestedBackend: IsolationBackend = "auto"): Promise<IsolationContext> {
   const top = await git(pi, cwd, ["rev-parse", "--show-toplevel"]);
   const status = await git(pi, top, ["status", "--porcelain=v1", "--untracked-files=all", "--", ".", ":(exclude).pi/agent-workflow-runs/**"]);
   const dirty = Boolean(status);
@@ -77,19 +158,35 @@ export async function prepareIsolation(pi: Exec, cwd: string, jobId: string): Pr
   const nested: NestedRepository[] = [];
   const nestedFind = await pi.exec("find", [top, "-mindepth", "2", "-type", "d", "-name", ".git", "-print"], { cwd: top, timeout: 60_000 });
   const nestedSources = nestedFind.code === 0 ? nestedFind.stdout.split("\n").map((path) => path.trim()).filter(Boolean).map((path) => dirname(path)).filter((path) => path !== join(top, ".git")) : [];
+  const baselineUntrackedPaths = dirty ? await files(pi, top, ["ls-files", "--others", "--exclude-standard", "-z"]) : [];
+  if (dirty) {
+    const patch = await pi.exec("git", ["diff", "--binary", "--full-index", base, "--", ".", ":(exclude).pi/agent-workflow-runs/**"], { cwd: top, timeout: 120_000 });
+    if (patch.code !== 0) { await rm(root, { recursive: true, force: true }); throw new Error(patch.stderr.trim() || "failed to snapshot dirty tree"); }
+    await writeFile(baselinePatch, patch.stdout, "utf8");
+    for (const path of baselineUntrackedPaths) baselineUntracked[path] = await hash(join(top, path));
+  }
+  let backend = await detectIsolationBackend(pi, top, requestedBackend);
+  let backendResource: string | undefined;
   try {
-    await git(pi, top, ["worktree", "add", "--detach", "--no-checkout", worktreeDir, base], 120_000);
-    await git(pi, worktreeDir, ["checkout", "--detach", base], 120_000);
-    if (dirty) {
-      const patch = await pi.exec("git", ["diff", "--binary", "--full-index", base, "--", ".", ":(exclude).pi/agent-workflow-runs/**"], { cwd: top, timeout: 120_000 });
-      if (patch.code !== 0) throw new Error(patch.stderr.trim() || "failed to snapshot dirty tree");
-      await writeFile(baselinePatch, patch.stdout, "utf8");
-      const untracked = await files(pi, top, ["ls-files", "--others", "--exclude-standard", "-z"]);
-      for (const path of untracked) {
-        baselineUntracked[path] = await hash(join(top, path));
-        await copyPath(top, worktreeDir, path);
+    try {
+      if (backend === "git-worktree") {
+        await git(pi, top, ["worktree", "add", "--detach", "--no-checkout", worktreeDir, base], 120_000);
+        await git(pi, worktreeDir, ["checkout", "--detach", base], 120_000);
+      } else {
+        backendResource = await nativeCopy(pi, top, worktreeDir, backend);
+        if (!dirty) await git(pi, worktreeDir, ["checkout", "--detach", base], 120_000);
       }
-      if (patch.stdout.trim()) await git(pi, worktreeDir, ["apply", "--binary", baselinePatch], 120_000);
+    } catch (error) {
+      if (backend === "git-worktree") throw error;
+      await rm(worktreeDir, { recursive: true, force: true });
+      backend = "git-worktree";
+      backendResource = undefined;
+      await git(pi, top, ["worktree", "add", "--detach", "--no-checkout", worktreeDir, base], 120_000);
+      await git(pi, worktreeDir, ["checkout", "--detach", base], 120_000);
+    }
+    if (dirty && backend === "git-worktree") {
+      for (const path of baselineUntrackedPaths) await copyPath(top, worktreeDir, path);
+      if ((await readFile(baselinePatch, "utf8")).trim()) await git(pi, worktreeDir, ["apply", "--binary", baselinePatch], 120_000);
     }
     // Nested repositories are cloned into the worker worktree so their own
     // branches, tools, and dirty state remain real Git repositories instead
@@ -124,7 +221,7 @@ export async function prepareIsolation(pi: Exec, cwd: string, jobId: string): Pr
     await rm(root, { recursive: true, force: true });
     throw error;
   }
-  return { mainCwd: top, worktreeDir, base, patchFile: join(root, "changes.patch"), dirty, baselinePatch: dirty ? baselinePatch : undefined, baselineUntracked, nested };
+  return { mainCwd: top, worktreeDir, base, patchFile: join(root, "changes.patch"), dirty, baselinePatch: dirty ? baselinePatch : undefined, baselineUntracked, nested, backend, ...(backendResource ? { backendResource } : {}) };
 }
 
 async function workerUntracked(pi: Exec, worktree: string): Promise<string[]> {
@@ -233,7 +330,17 @@ export async function mergeIsolation(pi: Exec, isolation: IsolationContext): Pro
 }
 
 export async function cleanupIsolation(pi: Exec, isolation: IsolationContext, preservePatch = false): Promise<void> {
-  await pi.exec("git", ["worktree", "remove", "--force", isolation.worktreeDir], { cwd: isolation.mainCwd, timeout: 120_000 }).catch(() => undefined);
-  await pi.exec("git", ["worktree", "prune"], { cwd: isolation.mainCwd, timeout: 30_000 }).catch(() => undefined);
+  if (isolation.backend === "git-worktree") {
+    await pi.exec("git", ["worktree", "remove", "--force", isolation.worktreeDir], { cwd: isolation.mainCwd, timeout: 120_000 }).catch(() => undefined);
+    await pi.exec("git", ["worktree", "prune"], { cwd: isolation.mainCwd, timeout: 30_000 }).catch(() => undefined);
+  } else if (isolation.backend === "overlay") {
+    await pi.exec("umount", [isolation.worktreeDir], { cwd: isolation.mainCwd, timeout: 30_000 }).catch(() => undefined);
+  } else if (isolation.backend === "btrfs") {
+    await pi.exec("btrfs", ["subvolume", "delete", isolation.worktreeDir], { cwd: isolation.mainCwd, timeout: 60_000 }).catch(() => undefined);
+  } else if (isolation.backend === "zfs" && isolation.backendResource) {
+    const [clone, snapshot] = isolation.backendResource.split("|");
+    if (clone) await pi.exec("zfs", ["destroy", "-r", clone], { cwd: isolation.mainCwd, timeout: 60_000 }).catch(() => undefined);
+    if (snapshot) await pi.exec("zfs", ["destroy", snapshot], { cwd: isolation.mainCwd, timeout: 60_000 }).catch(() => undefined);
+  }
   if (!preservePatch) await rm(dirname(isolation.worktreeDir), { recursive: true, force: true });
 }

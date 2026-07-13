@@ -20,7 +20,7 @@ You can delegate bounded work to automatically routed Pi workers.
 - Use delegate_work for one task and delegate_tasks for independent parallel slices. Do not delegate tiny questions or conversation.
 - Respect a user's request not to delegate. Workers may spawn nested children only through declared spawn policy and depth limits.
 - Delegation blocks by default. Use async only when the user explicitly requests background execution.
-- Use isolated workers for independent mutations only when the git tree is clean; isolation merges a checked patch back without committing.
+- Use isolated workers for independent mutations; isolation selects a native copy-on-write/snapshot backend when available and falls back to a checked Git worktree with dirty-tree merging.
 - Use wait_for_workers for background work, workflow_message to steer or continue a worker, worker_status for inspection, and cancel_workers for cancellation.
 - Workers coordinate through workflow_send, workflow_inbox, workflow_wait, and workflow_spawn. A worker can await a reply from Main; use workflow_reply to answer it.
 - workflow_resource reads agent://<job-id>/result, agent://<job-id>/history, and history://<job-id> resources.
@@ -41,31 +41,53 @@ function formatJob(job: Job): string {
   const context = job.contextTokens && job.contextWindow ? ` · ctx ${Math.round(job.contextTokens / job.contextWindow * 100)}%` : "";
   const cost = job.cost ? ` · $${job.cost.toFixed(4)}` : "";
   const lifecycle = job.lifecycle ? ` · ${job.lifecycle}` : "";
-  return `${icon} ${job.id} ${routeLabel(job.decision.kind).toLowerCase()} · depth ${job.depth ?? 0} · ${jobTask(job)} · ${job.status}${lifecycle} · ${jobDuration(job)}${usage}${context}${cost}`;
+  const delivery = job.lastDelivery ? ` · delivery:${job.lastDelivery}` : "";
+  const backend = job.isolationBackend ? ` · iso:${job.isolationBackend}` : "";
+  const unread = job.ircUnread ? ` · ✉${job.ircUnread}` : "";
+  return `${icon} ${job.id} ${routeLabel(job.decision.kind).toLowerCase()} · depth ${job.depth ?? 0} · ${jobTask(job)} · ${job.status}${lifecycle} · ${jobDuration(job)}${usage}${context}${cost}${backend}${delivery}${unread}`;
 }
 function renderWidget(tui: any, theme: WorkflowTheme, jobs: Job[], frame: number): string[] {
   const active = jobs.filter((job) => ["queued", "running"].includes(job.status));
-  const finished = jobs.filter((job) => !["queued", "running"].includes(job.status) && isRecent(job)).slice(-3).reverse();
-  if (!active.length && !finished.length) return [];
+  const finished = jobs.filter((job) => !["queued", "running"].includes(job.status) && isRecent(job)).slice(-4).reverse();
+  const bus = coordinationBus();
+  const pending = jobs.map((job) => ({ job, messages: bus.inbox(job.ircAddress ?? job.id, { peek: true, limit: 2 }) })).filter((item) => item.messages.length);
+  const inboxJobs = pending.map((item) => item.job).filter((job) => !active.includes(job) && !finished.includes(job));
+  if (!active.length && !finished.length && !inboxJobs.length) return [];
+  const visible = [...active, ...finished, ...inboxJobs];
+  const pendingCount = pending.reduce((count, item) => count + item.messages.length, 0);
   const width = tui?.terminal?.columns ?? 120;
   const line = (value: string) => truncateToWidth(value, width);
-  const rows = [line(theme.fg(active.length ? "accent" : "dim", active.length ? `● Agents · ${active.length} active` : "○ Agents"))];
-  for (const job of active) {
-    const icon = job.status === "running" ? theme.fg("accent", SPINNER[frame % SPINNER.length]) : theme.fg("muted", "◦");
+  const rows = [line(theme.fg(active.length ? "accent" : "dim", `${active.length ? "●" : "○"} Agents · ${active.length} active · ${pendingCount} pending`))];
+  const byParent = new Map<string, Job[]>();
+  for (const job of visible) { const children = byParent.get(job.parentId ?? "") ?? []; children.push(job); byParent.set(job.parentId ?? "", children); }
+  const roots = visible.filter((job) => !job.parentId || !visible.some((candidate) => candidate.id === job.parentId));
+  const ordered: Array<{ job: Job; depth: number }> = [];
+  const visit = (job: Job, depth: number, seen = new Set<string>()) => {
+    if (seen.has(job.id)) return;
+    seen.add(job.id); ordered.push({ job, depth });
+    for (const child of byParent.get(job.id) ?? []) visit(child, depth + 1, new Set(seen));
+  };
+  for (const root of roots) visit(root, 0);
+  for (const item of visible) if (!ordered.some((entry) => entry.job.id === item.id)) visit(item, 0);
+  for (const { job, depth } of ordered) {
+    const tree = depth ? `${"│  ".repeat(Math.min(depth - 1, 3))}└─` : "├─";
+    const icon = job.status === "running" ? theme.fg("accent", SPINNER[frame % SPINNER.length]) : job.status === "succeeded" ? theme.fg("success", "✓") : job.status === "failed" ? theme.fg("error", "✗") : theme.fg("muted", "◦");
     const model = job.decision.profile.model.split("/").at(-1) || "unconfigured";
-    rows.push(line(`${theme.fg("dim", "├─")} ${icon} ${theme.bold(routeLabel(job.decision.kind))} ${theme.fg("muted", jobTask(job))} ${theme.fg("dim", `· d${job.depth ?? 0} · ${model} · ↻${job.attempts} · ${job.toolUses ?? 0} tools · ${jobDuration(job)}`)}`));
+    const unread = bus.inbox(job.ircAddress ?? job.id, { peek: true, limit: 1 });
+    job.ircUnread = bus.unread(job.ircAddress ?? job.id);
+    const delivery = job.lastDelivery ? ` · ${job.lastDelivery}` : "";
+    const mailbox = unread.length ? ` · ${theme.fg("accent", `✉${job.ircUnread}`)}` : "";
+    const telemetry = `${job.toolUses ?? 0} tools${job.usage?.totalTokens ? ` · ${job.usage.totalTokens.toLocaleString()} tok` : ""}${job.cost ? ` · $${job.cost.toFixed(4)}` : ""}${job.isolationBackend ? ` · ${job.isolationBackend}` : ""}`;
+    rows.push(line(`${theme.fg("dim", tree)} ${icon} ${theme.bold(routeLabel(job.decision.kind))} ${theme.fg("muted", jobTask(job))} ${theme.fg("dim", `· d${job.depth ?? 0} · ${model} · ↻${job.attempts} · ${telemetry} · ${jobDuration(job)}${delivery}`)}${mailbox}`));
     const activity = job.currentTool ? TOOL_ACTIVITY[job.currentTool] ?? job.currentTool : job.lastMessage;
-    if (activity) rows.push(line(`${theme.fg("dim", "│    ⎿")} ${theme.fg("dim", activity)}`));
+    if (activity) rows.push(line(`${theme.fg("dim", `${"│  ".repeat(Math.min(depth, 3))}│  ⎿`)} ${theme.fg("dim", activity)}`));
+    if (unread[0]) rows.push(line(`${theme.fg("dim", `${"│  ".repeat(Math.min(depth, 3))}│  ✉`)} ${theme.fg("muted", `${unread[0].from}: ${unread[0].body.replace(/\s+/g, " ").slice(0, 150)}`)}`));
     if (job.livePreview) {
       const preview = job.livePreview.length > 240 ? `…${job.livePreview.slice(-239)}` : job.livePreview;
-      rows.push(line(`${theme.fg("dim", "│    ≋")} ${theme.fg("muted", preview)}`));
+      rows.push(line(`${theme.fg("dim", `${"│  ".repeat(Math.min(depth, 3))}│  ≋`)} ${theme.fg("muted", preview)}`));
     }
   }
-  for (const job of finished) {
-    const icon = job.status === "succeeded" ? theme.fg("success", "✓") : job.status === "cancelled" ? theme.fg("dim", "■") : theme.fg("error", "✗");
-    rows.push(line(`${theme.fg("dim", "├─")} ${icon} ${theme.fg("dim", `${routeLabel(job.decision.kind)} ${jobTask(job)} · ${job.status} · ${jobDuration(job)}`)}`));
-  }
-  return rows.slice(0, 12);
+  return rows.slice(0, 16);
 }
 
 function resultText(job: Job): string {
@@ -107,7 +129,8 @@ export default function piAgentWorkflow(pi: ExtensionAPI) {
   const cwdJobs = (cwd = activeCtx?.cwd) => [...jobs.values()].filter((job) => !cwd || job.cwd === cwd);
   const refresh = () => {
     const ctx = activeCtx; if (!ctx) return;
-    const visible = cwdJobs().filter((job) => ["queued", "running"].includes(job.status) || isRecent(job));
+    const bus = coordinationBus();
+    const visible = cwdJobs().filter((job) => ["queued", "running"].includes(job.status) || isRecent(job) || bus.unread(job.ircAddress ?? job.id) > 0);
     if (!visible.length) {
       if (widgetRegistered) ctx.ui.setWidget("pi-agent-workflow", undefined);
       widgetRegistered = false; widgetTui = undefined;
@@ -162,6 +185,11 @@ export default function piAgentWorkflow(pi: ExtensionAPI) {
   };
   const irc = coordinationBus();
   const addressOf = (job: Job) => job.ircAddress ?? job.id;
+  const noteDelivery = (job: Job | undefined, outcome: string) => {
+    if (!job) return;
+    job.lastDelivery = outcome; job.lastDeliveryAt = new Date().toISOString(); job.deliveryCount = (job.deliveryCount ?? 0) + 1;
+    job.ircUnread = irc.unread(addressOf(job)); scheduler.notify(job);
+  };
   let coordinate!: (worker: Job, request: CoordinationRequest, signal: AbortSignal | undefined) => Promise<CoordinationResponse>;
   const startJob = (ctx: ExtensionContext, job: Job, images: ImageAttachment[]) => {
     const currentConfig = config!;
@@ -187,9 +215,14 @@ export default function piAgentWorkflow(pi: ExtensionAPI) {
       return { ok: true, result: [{ id: "Main", kind: "parent", status: activeCtx ? "running" : "unavailable", depth: -1, unread: irc.unread("Main"), task: "Parent orchestrator" }, ...peers.values()] };
     }
     const sender = addressOf(worker);
-    if (request.type === "inbox") return { ok: true, result: irc.inbox(sender, { from: request.from, peek: request.peek }) };
+    if (request.type === "inbox") {
+      const result = irc.inbox(sender, { from: request.from, peek: request.peek });
+      worker.ircUnread = irc.unread(sender); scheduler.notify(worker);
+      return { ok: true, result };
+    }
     if (request.type === "wait") {
       const waited = await irc.wait(sender, { from: request.from, timeoutMs: request.timeoutMs ?? 120_000, signal });
+      worker.ircUnread = irc.unread(sender); scheduler.notify(worker);
       return { ok: true, result: waited ?? null };
     }
     if (request.type === "resource") {
@@ -225,6 +258,7 @@ export default function piAgentWorkflow(pi: ExtensionAPI) {
         const published = irc.publish({ from: sender, to: delivery.id, body: message, ...(request.replyTo ? { replyTo: request.replyTo } : {}) });
         if (published.consumed) {
           receipts.push({ messageId: published.message.id, to: delivery.id, outcome: "consumed" });
+          noteDelivery(worker, "consumed"); noteDelivery(delivery.peer, "consumed");
           continue;
         }
         if (delivery.id === "Main") {
@@ -232,13 +266,16 @@ export default function piAgentWorkflow(pi: ExtensionAPI) {
             pi.sendMessage({ customType: "pi-agent-workflow-worker", content: `IRC ${sender} → Main [${published.message.id}]\n${message}\n${request.awaitReply ? `Reply with workflow_reply(target=${sender}, replyTo=${published.message.id}, message=...) within ${timeoutMs}ms.` : "No reply requested."}`, display: true, details: { jobId: worker.id, messageId: published.message.id, from: sender } }, { deliverAs: request.awaitReply ? "followUp" : "steer", triggerTurn: request.awaitReply });
             irc.consume("Main", published.message.id);
             receipts.push({ messageId: published.message.id, to: "Main", outcome: "injected" });
-          } catch { receipts.push({ messageId: published.message.id, to: "Main", outcome: "failed", error: "Parent session rejected the message." }); }
+            noteDelivery(worker, "injected");
+          } catch { receipts.push({ messageId: published.message.id, to: "Main", outcome: "failed", error: "Parent session rejected the message." });
+            noteDelivery(worker, "failed"); }
           continue;
         }
         const peer = delivery.peer!;
         if (peer.status === "running" && scheduler.message(peer.id, `[IRC ${published.message.id} from ${sender}] ${message}`, "steer")) {
           irc.consume(delivery.id, published.message.id);
           receipts.push({ messageId: published.message.id, to: delivery.id, outcome: "injected" });
+          noteDelivery(worker, "injected"); noteDelivery(peer, "injected");
           continue;
         }
         if (!broadcast && peer.sessionFile && activeCtx) {
@@ -258,8 +295,13 @@ export default function piAgentWorkflow(pi: ExtensionAPI) {
             onCoordination: coordinate,
           }, queued, peer, wakeSignal), undefined, providerOf(peer.decision.profile.model));
           irc.consume(delivery.id, published.message.id);
-          receipts.push({ messageId: published.message.id, to: delivery.id, outcome: peer.lifecycle === "parked" ? "revived" : "woken" });
-        } else receipts.push({ messageId: published.message.id, to: delivery.id, outcome: "queued" });
+          const outcome = peer.lifecycle === "parked" ? "revived" : "woken";
+          receipts.push({ messageId: published.message.id, to: delivery.id, outcome });
+          noteDelivery(worker, outcome); noteDelivery(peer, outcome);
+        } else {
+          receipts.push({ messageId: published.message.id, to: delivery.id, outcome: "queued" });
+          noteDelivery(worker, "queued"); noteDelivery(peer, "queued");
+        }
       }
       const delivered = receipts.filter((receipt) => receipt.outcome !== "failed");
       if (!delivered.length) return { ok: false, error: receipts.map((receipt) => receipt.error).filter(Boolean).join("; ") || "No selected peer accepted the message.", result: receipts };
@@ -523,7 +565,7 @@ export default function piAgentWorkflow(pi: ExtensionAPI) {
       const [command = "status", ...rest] = args.trim().split(/\s+/).filter(Boolean);
       if (command === "stop") { const count = cwdJobs(ctx.cwd).filter((job) => scheduler.cancel(job.id)).length; ctx.ui.notify(`Cancelled ${count} worker${count === 1 ? "" : "s"}.`, "info"); return; }
       if (command === "steer" || command === "followup") { const [id, ...parts] = rest; const sent = Boolean(id && parts.length && scheduler.message(id, parts.join(" "), command === "followup" ? "follow_up" : "steer")); ctx.ui.notify(sent ? `Message sent to ${id}.` : `Usage: /workflow ${command} <job-id> <message>`, sent ? "info" : "warning"); return; }
-      if (command === "config") { ctx.ui.notify([`Concurrency: ${config.maxConcurrent} global / ${config.maxConcurrentPerProvider} per provider`, `Timeout: ${Math.round(config.timeoutMs / 60_000)}m`, `Retries: ${config.maxRetries}`, `Persistence: ${config.persistState ? "on" : "off"}`, `Isolation: ${config.isolation ? "on" : "off"}`, `Recursion: depth ${config.maxDepth}, ${config.maxChildrenPerWorker} children/worker, ${config.maxNestedConcurrent} nested slots`, ...profileSummary(config)].join("\n"), "info"); return; }
+      if (command === "config") { ctx.ui.notify([`Concurrency: ${config.maxConcurrent} global / ${config.maxConcurrentPerProvider} per provider`, `Timeout: ${Math.round(config.timeoutMs / 60_000)}m`, `Retries: ${config.maxRetries}`, `Persistence: ${config.persistState ? "on" : "off"}`, `Isolation: ${config.isolation ? "on" : "off"} (${config.isolationBackend})`, `Recursion: depth ${config.maxDepth}, ${config.maxChildrenPerWorker} children/worker, ${config.maxNestedConcurrent} nested slots`, ...profileSummary(config)].join("\n"), "info"); return; }
       if (command === "doctor") {
         const live = rest.includes("live");
         const models = [...new Set(Object.values(config.profiles).flatMap((profile) => [profile.model, ...(Array.isArray(profile.fallback) ? profile.fallback : profile.fallback ? [profile.fallback] : [])]).filter(Boolean))];

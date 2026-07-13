@@ -5,7 +5,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { cleanupIsolation, mergeIsolation, prepareIsolation } from "../src/isolation.js";
+import { cleanupIsolation, detectIsolationBackend, mergeIsolation, prepareIsolation } from "../src/isolation.js";
 import { loadWorkflowState, saveWorkflowState } from "../src/state.js";
 import type { Job } from "../src/types.js";
 
@@ -33,6 +33,21 @@ function sampleJob(): Job {
     attempts: 1,
   };
 }
+
+test("auto isolation selects a native backend when the host supports one", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "pi-backend-test-"));
+  try {
+    await executor.exec("git", ["init", "-q"], { cwd });
+    await executor.exec("git", ["config", "user.email", "test@example.com"], { cwd });
+    await executor.exec("git", ["config", "user.name", "Test"], { cwd });
+    await writeFile(join(cwd, "value.txt"), "value\n");
+    await executor.exec("git", ["add", "value.txt"], { cwd });
+    await executor.exec("git", ["commit", "-qm", "initial"], { cwd });
+    const backend = await detectIsolationBackend(executor, cwd, "auto");
+    assert.ok(["git-worktree", "apfs-clone", "reflink", "btrfs", "zfs", "overlay"].includes(backend));
+    assert.equal(await detectIsolationBackend(executor, cwd, "git-worktree"), "git-worktree");
+  } finally { await rm(cwd, { recursive: true, force: true }); }
+});
 
 test("workflow state round-trips atomically", async () => {
   const cwd = await mkdtemp(join(tmpdir(), "pi-state-test-"));
